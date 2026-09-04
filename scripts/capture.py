@@ -73,6 +73,9 @@ def main():
         t_reset = time.time()
         el = lambda: time.time() - t_reset
         print(f"board reset at +0.0s, listening on {a.port} @ {a.baud} ...")
+        time.sleep(2.5)                      # let boot finish (no auto-dump now)
+        ser.write(b"r")                      # trigger 30 s capture on-device
+        print(f"  [+{el():5.1f}s] sent 'r' -> device records 30 s from here")
         print("watch the phases below: only audio between REC_START and REC_END")
         print("ends up in the .wav (VU lines before/after are live, not recorded).")
         buf, linebuf = "", ""

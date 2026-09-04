@@ -1,7 +1,7 @@
 /*
- * edge_wake phase 1: continuous listening loop.
+ * edge_wake phase 2: continuous listening + log-mel frontend.
  * INMP441 -> ESP32-S3 I2S -> 16 kHz mono PCM -> circular ring buffer
- * -> per-hop energy VAD + live VU. BOOT button = fresh 30 s record + dump.
+ * -> per-hop energy VAD + live VU + on-device log-mel (esp-dsp FFT).
  *
  * Wiring (INMP441 breakout -> ESP32-S3 DevKit):
  *   VDD -> 3V3        (NEVER 5V)
@@ -23,12 +23,15 @@
  *  - every 500 ms: VU line (RMS / peak / dBFS / VAD state / ring fill %)
  *  - 5 s after boot: ring self-check (newest hop re-read from ring must
  *    match what was written, incl. wraparound later) -> "ring self-check OK"
- *  - press BOOT button (GPIO0): fresh 30 s record (480000 samples, 960 KB
- *    PSRAM buffer; PSRAM OCTAL @ 80 MHz required, see sdkconfig.defaults),
- *    stats + hex dump between AUD_DUMP_START / AUD_DUMP_END, framed by
- *    REC_START / REC_END. Console at 921600 baud so the dump takes ~30 s.
- *  - host script scripts/capture.py converts a dump to sample.wav and now
- *    narrates phases live (boot -> arming -> recording -> dumping).
+ *  - BOOT short-press (or serial 'f'): fresh 1 s PCM -> 61x40 log-mel dump
+ *    (FE_PCM_* + FE_MEL_* markers, %a exact floats) for
+ *    scripts/frontend_check.py. Hold BOOT 1.5 s (or serial 'r'): fresh
+ *    30 s record (480000 samples, 960 KB PSRAM buffer; PSRAM OCTAL @ 80 MHz
+ *    required, see sdkconfig.defaults), stats + hex dump between
+ *    AUD_DUMP_START / AUD_DUMP_END, framed by REC_START / REC_END.
+ *    Console runs at 921600 baud so the ~1.9 MB dump takes ~30 s.
+ *  - host scripts: capture.py converts a 30 s dump to sample.wav (sends
+ *    'r' itself); frontend_check.py verifies the S3 mel against numpy.
  *
  * Conversion note: INMP441 data is 24-bit left-justified in a 32-bit slot
  * (raw = data << 8). raw >> 16 would be "correct" 16-bit but very quiet
@@ -44,7 +47,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <math.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -52,6 +58,7 @@
 #include "esp_timer.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
+#include "frontend.h"
 
 static const char *TAG = "mic_test";
 
@@ -256,15 +263,65 @@ static void dump_hex(const int16_t *pcm, int n)
     fflush(stdout);
 }
 
+// CRC32 (zlib polynomial) over PCM: proves the host parsed the same bytes
+// the S3 processed, ruling UART transport noise in or out definitively.
+static uint32_t pcm_crc32(const int16_t *pcm, int n)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (int i = 0; i < n; i++) {
+        crc ^= (uint16_t)pcm[i];
+        for (int b = 0; b < 16; b++) crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+    }
+    return ~crc;
+}
+
+// Main-loop scratch: static, NOT stack (default main-task stack is small and
+// printf/%a + dsps calls below it need headroom). Single task only.
+static int16_t s_hop[HOP_SAMPLES];
+static int16_t s_check[HOP_SAMPLES];
+static int16_t s_trash[960];
+
 static int16_t *rec_buf = NULL;
+static int16_t *fe_pcm = NULL;   // 1 s scratch for frontend dumps (32 KB)
+static bool have_serial_cmd = false;
+
+// Stateless-frontend helper: raw predecessor of frame f in fe_pcm
+// (f == 0 -> stream start -> 0). Pass explicitly: with 50% overlap a
+// running tail would advance pre-emphasis 2x too fast (Phase-2 bug find).
+static inline float fe_prev_of(int f)
+{
+    return (f == 0) ? 0.0f : (float)fe_pcm[f * FE_HOP - 1] / 32768.0f;
+}
+
+// Forward declarations (defined further below).
+static void do_capture(const char *why);
+static void fe_dump_1s(const char *why);
+static void fe_pow_dump(const char *why);
+
+static void poll_serial_cmd(void)
+{
+    if (!have_serial_cmd) return;
+    char c;
+    int r = read(STDIN_FILENO, &c, 1);
+    if (r != 1) return;
+    if (c == 'f') {
+        ESP_LOGI(TAG, "serial cmd 'f' -> frontend dump");
+        fe_dump_1s("serial");
+    } else if (c == 'r') {
+        ESP_LOGI(TAG, "serial cmd 'r' -> 30 s capture");
+        do_capture("serial");
+    } else if (c == 'p') {
+        ESP_LOGI(TAG, "serial cmd 'p' -> power-spectrum debug dump");
+        fe_pow_dump("serial");
+    }
+}
 
 static void do_capture(const char *why)
 {
     ESP_LOGI(TAG, "=== capture (%s): recording %d s @ %d Hz mono ===",
              why, REC_SECONDS, SAMPLE_RATE);
     // flush DMA pipeline so the recording starts fresh
-    int16_t trash[480];
-    for (int i = 0; i < 4; i++) read_mono_block(trash, 480);
+    for (int i = 0; i < 4; i++) read_mono_block(s_trash, 480);
     printf("REC_START seconds=%d\n", REC_SECONDS);
 
     int filled = 0;
@@ -290,15 +347,154 @@ static void do_capture(const char *why)
     ESP_LOGI(TAG, "resuming continuous listening loop");
 }
 
+// Fresh 1 s of PCM -> log-mel frames -> exact-float dump for
+// scripts/frontend_check.py. Prints FE_PCM_* then FE_MEL_* blocks.
+static void fe_dump_1s(const char *why)
+{
+    const int want = FE_SR;   // 16000 samples
+    ESP_LOGI(TAG, "=== frontend dump (%s): 1 s PCM + log-mel ===", why);
+    for (int i = 0; i < 4; i++) read_mono_block(s_trash, 480);
+    printf("FE_REC_START\n");
+
+    int filled = 0;
+    while (filled < want) {
+        int chunk = want - filled > 960 ? 960 : want - filled;
+        int got = read_mono_block(fe_pcm + filled, chunk);
+        if (got <= 0) { ESP_LOGW(TAG, "fe i2s timeout at %d", filled); continue; }
+        filled += got;
+    }
+    printf("FE_REC_END samples=%d\n", filled);
+    print_stats("fe_pcm", fe_pcm, filled);
+
+    printf("FE_PCM_START samples=%d\n", filled);
+    printf("FE_PCM_CRC %08lx\n", (unsigned long)pcm_crc32(fe_pcm, filled));
+    for (int i = 0; i < filled; i += 256) {
+        int m = filled - i < 256 ? filled - i : 256;
+        printf("FE_PCM:");
+        for (int j = 0; j < m; j++) printf("%04x", (uint16_t)fe_pcm[i + j]);
+        printf("\n");
+    }
+    printf("FE_PCM_END\n");
+
+    int nf = fe_nframes(filled);
+    printf("FE_MEL_START frames=%d mels=%d\n", nf, FE_NMELS);
+    // Compute first (timed, no prints), dump after: the ms/frame number is
+    // honest CPU cost, not UART time. Matches future KWS flow.
+    static float mel_all[FE_NFRAMES_1S][FE_NMELS];
+    int64_t t0 = esp_timer_get_time();
+    for (int f = 0; f < nf; f++) {
+        fe_frame(fe_pcm + f * FE_HOP, fe_prev_of(f), NULL, mel_all[f]);
+    }
+    int64_t t1 = esp_timer_get_time();
+    for (int f = 0; f < nf; f++) {
+        printf("FE_MEL:");
+        for (int m = 0; m < FE_NMELS; m++) printf(" %a", (double)mel_all[f][m]);
+        printf("\n");
+    }
+    printf("FE_MEL_END\n");
+    ESP_LOGI(TAG, "fe: %d frames in %.2f ms (%.2f ms/frame)", nf,
+             (t1 - t0) / 1000.0, (t1 - t0) / 1000.0 / nf);
+    // Diagnosis replay: same reset + order as the mel loop above, so this x[]
+    // is bit-identical to what the mel used. First 8 frames only.
+    static float x_dbg[FE_FRAME];
+    for (int f = 0; f < 8 && f < nf; f++) {
+        fe_debug_x(fe_pcm + f * FE_HOP, fe_prev_of(f), NULL, x_dbg);
+        printf("FE_X frame=%d:", f);
+        for (int n = 0; n < FE_FRAME; n++) printf(" %a", (double)x_dbg[n]);
+        printf("\n");
+    }
+    printf("FE_X_END\n");
+    fflush(stdout);
+    ESP_LOGI(TAG, "resuming continuous listening loop");
+}
+
+// Debug: capture 1 s, find loudest + quietest frames by total power, dump
+// their 257-bin power spectra (%a exact). For scripts/pow_check.py —
+// localizes frontend mismatches to FFT-vs-melbank without guessing.
+static void fe_pow_dump(const char *why)
+{
+    const int want = FE_SR;
+    ESP_LOGI(TAG, "=== power debug dump (%s) ===", why);
+    for (int i = 0; i < 4; i++) read_mono_block(s_trash, 480);
+    int filled = 0;
+    while (filled < want) {
+        int chunk = want - filled > 960 ? 960 : want - filled;
+        int got = read_mono_block(fe_pcm + filled, chunk);
+        if (got <= 0) continue;
+        filled += got;
+    }
+    int nf = fe_nframes(filled);
+    static float pow_scratch[FE_NBINS];
+    printf("FE_PCM_START samples=%d\n", filled);
+    printf("FE_PCM_CRC %08lx\n", (unsigned long)pcm_crc32(fe_pcm, filled));
+    for (int i = 0; i < filled; i += 256) {
+        int m = filled - i < 256 ? filled - i : 256;
+        printf("FE_PCM:");
+        for (int j = 0; j < m; j++) printf("%04x", (uint16_t)fe_pcm[i + j]);
+        printf("\n");
+    }
+    printf("FE_PCM_END\n");
+    int i_loud = 0, i_quiet = 0;
+    float e_loud = -1.0f, e_quiet = 1e30f;
+    for (int f = 0; f < nf; f++) {
+        fe_power(fe_pcm + f * FE_HOP, fe_prev_of(f), NULL, pow_scratch);
+        float tot = 0.0f;
+        for (int k = 0; k < FE_NBINS; k++) tot += pow_scratch[k];
+        if (tot > e_loud) { e_loud = tot; i_loud = f; }
+        if (tot < e_quiet) { e_quiet = tot; i_quiet = f; }
+    }
+    printf("FE_POW_START frames=%d bins=%d loud=%d quiet=%d\n", nf, FE_NBINS, i_loud, i_quiet);
+    {   // Window table first: proves/disproves the table itself in one shot.
+        static float w_dump[FE_FRAME];
+        fe_debug_window(w_dump);
+        printf("FE_WIN n=%d:", FE_FRAME);
+        for (int n = 0; n < FE_FRAME; n++) printf(" %a", (double)w_dump[n]);
+        printf("\n");
+    }
+    // Second replay: same state trajectory, but also capture the FFT input
+    // vector x[] for the two frames of interest (FE_X lines). x + power
+    // together blame pre-FFT stages vs the FFT itself, no guessing.
+    static float x_save[2][FE_FRAME];
+    for (int f = 0; f < nf; f++) {
+        int slot = (f == i_loud) ? 0 : (f == i_quiet) ? 1 : -1;
+        if (slot >= 0) {
+            fe_debug_x(fe_pcm + f * FE_HOP, fe_prev_of(f), NULL, x_save[slot]);
+            fe_power_from_x(x_save[slot], pow_scratch);
+            printf("FE_X frame=%d:", f);
+            for (int n = 0; n < FE_FRAME; n++) printf(" %a", (double)x_save[slot][n]);
+            printf("\n");
+            printf("FE_POW frame=%d:", f);
+        } else {
+            fe_power(fe_pcm + f * FE_HOP, fe_prev_of(f), NULL, pow_scratch);
+            if (f != i_loud && f != i_quiet) continue;
+            printf("FE_POW frame=%d:", f);
+        }
+        for (int k = 0; k < FE_NBINS; k++) printf(" %a", (double)pow_scratch[k]);
+        printf("\n");
+    }
+    printf("FE_POW_END\n");
+    fflush(stdout);
+    ESP_LOGI(TAG, "resuming continuous listening loop");
+}
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "edge_wake phase1 boot. heap internal=%u",
+    ESP_LOGI(TAG, "edge_wake phase2 boot. heap internal=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
     gpio_set_direction(PIN_BUTTON, GPIO_MODE_INPUT);
     gpio_set_pull_mode(PIN_BUTTON, GPIO_PULLUP_ONLY);
 
+    // Serial single-char commands: 'f' = 1 s frontend dump, 'r' = 30 s capture.
+    // Non-blocking; if the UART VFS refuses, buttons remain the fallback.
+    int fl = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (fl >= 0 && fcntl(STDIN_FILENO, F_SETFL, fl | O_NONBLOCK) == 0) {
+        have_serial_cmd = true;
+    }
+    ESP_LOGI(TAG, "serial commands %s", have_serial_cmd ? "ON ('f'/'r')" : "OFF (buttons only)");
+
     i2s_init();
+    fe_init();
 
     // Ring lives in internal RAM (hot path, DMA-adjacent, future pre-roll).
     ring_buf = heap_caps_malloc(RING_SAMPLES * sizeof(int16_t),
@@ -309,30 +505,33 @@ void app_main(void)
     if (!rec_buf) rec_buf = heap_caps_malloc(REC_SAMPLES * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!rec_buf) rec_buf = malloc(REC_SAMPLES * sizeof(int16_t));
     if (!rec_buf) { ESP_LOGE(TAG, "cannot allocate %u-byte rec buffer", (unsigned)(REC_SAMPLES * 2)); return; }
+    // 1 s frontend scratch: internal (hot path).
+    fe_pcm = heap_caps_malloc(FE_SR * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!fe_pcm) fe_pcm = malloc(FE_SR * sizeof(int16_t));
+    if (!fe_pcm) { ESP_LOGE(TAG, "cannot allocate fe buffer"); return; }
     ESP_LOGI(TAG, "ring %u KB internal, rec buffer %u KB @ %p",
              (unsigned)(RING_SAMPLES * 2 / 1024), (unsigned)(REC_SAMPLES * 2 / 1024), rec_buf);
 
-    int16_t hop[HOP_SAMPLES];
-    int16_t check[HOP_SAMPLES];
     int btn_prev = 1;
     int64_t t_boot = esp_timer_get_time();
     int64_t last_vu = t_boot;
     bool selfcheck_done = false;
     int vu_peak_max = 0;
 
-    ESP_LOGI(TAG, "listening... speak/clap to see VAD flip, BOOT button = 30 s capture");
+    ESP_LOGI(TAG, "listening... VAD flips on speech; BOOT short-press = mel dump, hold 1.5 s = 30 s capture; serial 'f'/'r' same");
     while (1) {
-        int got = read_mono_block(hop, HOP_SAMPLES);
+        poll_serial_cmd();
+        int got = read_mono_block(s_hop, HOP_SAMPLES);
         if (got != HOP_SAMPLES) {
             ESP_LOGW(TAG, "short hop: %d/%d (I2S underrun?)", got, HOP_SAMPLES);
             if (got <= 0) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
         }
-        ring_push(hop, got);
+        ring_push(s_hop, got);
 
         // Gate VAD until the DMA pipeline has settled: the first ~10 hops
         // after boot contain startup garbage (I2S/DMA priming, auto_clear)
         // and must not latch a bogus SPEECH at t=0.03 s.
-        int rms = hop_rms(hop, got);
+        int rms = hop_rms(s_hop, got);
         if (ring_write > 10 * (uint32_t)HOP_SAMPLES && vad_update(rms)) {
             ESP_LOGI(TAG, "VAD: -> %s (rms=%d, t=%.2fs)",
                      vad_state == VAD_SPEECH ? "SPEECH" : "SILENCE",
@@ -344,8 +543,8 @@ void app_main(void)
             last_vu = now;
             long long sumsq = 0; int peak = 0;
             for (int i = 0; i < got; i++) {
-                sumsq += (long long)hop[i] * hop[i];
-                int a = hop[i] >= 0 ? hop[i] : -hop[i];
+                sumsq += (long long)s_hop[i] * s_hop[i];
+                int a = s_hop[i] >= 0 ? s_hop[i] : -s_hop[i];
                 if (a > peak) peak = a;
             }
             if (peak > vu_peak_max) vu_peak_max = peak;
@@ -362,8 +561,8 @@ void app_main(void)
         // i.e. after the 2 s ring has wrapped at least once).
         if (!selfcheck_done && now - t_boot > 5000000 && got == HOP_SAMPLES) {
             selfcheck_done = true;
-            ring_newest(check, HOP_SAMPLES);
-            if (memcmp(check, hop, HOP_SAMPLES * sizeof(int16_t)) == 0) {
+            ring_newest(s_check, HOP_SAMPLES);
+            if (memcmp(s_check, s_hop, HOP_SAMPLES * sizeof(int16_t)) == 0) {
                 ESP_LOGI(TAG, "ring self-check OK (%u samples stored, wrap-tested)",
                          (unsigned)ring_write);
             } else {
@@ -373,12 +572,25 @@ void app_main(void)
 
         int btn = gpio_get_level(PIN_BUTTON);
         if (btn_prev == 1 && btn == 0) {
+            int64_t t_press = esp_timer_get_time();
             vTaskDelay(pdMS_TO_TICKS(50));  // debounce
-            if (gpio_get_level(PIN_BUTTON) == 0) {
-                do_capture("button");
-                while (gpio_get_level(PIN_BUTTON) == 0) vTaskDelay(pdMS_TO_TICKS(20));
-                last_vu = esp_timer_get_time();
+            if (gpio_get_level(PIN_BUTTON) != 0) { btn_prev = 1; continue; }
+            // Distinguish tap vs hold. I2S overflows while we wait — harmless,
+            // both actions flush the pipeline first.
+            bool hold = false;
+            while (gpio_get_level(PIN_BUTTON) == 0) {
+                if (esp_timer_get_time() - t_press > 1500000) { hold = true; break; }
+                vTaskDelay(pdMS_TO_TICKS(20));
             }
+            if (hold) {
+                do_capture("button-hold");
+            } else {
+                fe_dump_1s("button");
+            }
+            while (gpio_get_level(PIN_BUTTON) == 0) vTaskDelay(pdMS_TO_TICKS(20));
+            btn_prev = 1;
+            last_vu = esp_timer_get_time();
+            continue;
         }
         btn_prev = btn;
     }

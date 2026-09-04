@@ -1,5 +1,7 @@
 # Build output (regenerate with: idf.py set-target esp32s3 && idf.py build)
 build/
+# Component-manager downloads (recreated by build; main/idf_component.yml pins them)
+managed_components/
 # Full config snapshot (regenerated from sdkconfig.defaults)
 sdkconfig
 sdkconfig.old

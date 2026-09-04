@@ -12,5 +12,10 @@ CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600
 # Run at full speed from now on (KWS inference needs it; also
 # makes "10% CPU" math consistent across all later phases)
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# Main task hosts the listening loop + printf-heavy dumps: give it room
+# (KWS inference will need this too)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# esp-dsp FFT table: we only ever need 512-pt (frontend NFFT)
+CONFIG_DSP_MAX_FFT_SIZE_512=y
 # Keep log informative but not noisy
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
