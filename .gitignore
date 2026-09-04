@@ -1,0 +1,15 @@
+# Build output (regenerate with: idf.py set-target esp32s3 && idf.py build)
+build/
+# Full config snapshot (regenerated from sdkconfig.defaults)
+sdkconfig
+sdkconfig.old
+# EIM local environment paths (machine-specific)
+eim_config.toml
+# IDF toolchain caches
+.cache/
+# Editor / IDE files
+.zed/
+.clangd
+# Python bytecode
+__pycache__/
+scripts/__pycache__/

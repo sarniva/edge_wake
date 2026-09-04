@@ -1,0 +1,13 @@
+# Default target
+CONFIG_IDF_TARGET="esp32s3"
+# Our board: 16MB quad flash (detected via esptool flash_id) + 8MB octal PSRAM
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# 8MB octal PSRAM @80MHz (needed for the 30 s / 960 KB capture buffer)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# Fast console so the ~1.9 MB hex dump finishes in ~30 s instead of ~3 min
+CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600
+# Keep log informative but not noisy
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
