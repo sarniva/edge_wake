@@ -77,8 +77,11 @@ static const char *TAG = "mic_test";
 #define RING_SAMPLES      (SAMPLE_RATE * RING_SECONDS)  // 32000 samples, 64 KB
 
 // ---- VAD (energy gate with hysteresis + hangover) ----
-#define VAD_ENTER_RMS     1200        // hop RMS above this -> SPEECH (tune me)
-#define VAD_EXIT_RMS      600         // hop RMS below this -> maybe SILENCE
+// Calibrated 2026-09-04 from quiet-room log (traffic background):
+// floor ~1500-3500 RMS -> exit ~2x floor min, enter ~2x exit.
+// Speech at 30 cm is ~8000+ RMS, so it still trips reliably.
+#define VAD_ENTER_RMS     6000        // hop RMS above this -> SPEECH
+#define VAD_EXIT_RMS      3000        // hop RMS below this -> maybe SILENCE
 #define VAD_HANGOVER_HOPS 10          // 300 ms of sub-exit hops before SILENCE
 
 static i2s_chan_handle_t rx_chan = NULL;
@@ -326,8 +329,11 @@ void app_main(void)
         }
         ring_push(hop, got);
 
+        // Gate VAD until the DMA pipeline has settled: the first ~10 hops
+        // after boot contain startup garbage (I2S/DMA priming, auto_clear)
+        // and must not latch a bogus SPEECH at t=0.03 s.
         int rms = hop_rms(hop, got);
-        if (vad_update(rms)) {
+        if (ring_write > 10 * (uint32_t)HOP_SAMPLES && vad_update(rms)) {
             ESP_LOGI(TAG, "VAD: -> %s (rms=%d, t=%.2fs)",
                      vad_state == VAD_SPEECH ? "SPEECH" : "SILENCE",
                      rms, (esp_timer_get_time() - t_boot) / 1000000.0);

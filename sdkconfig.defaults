@@ -9,5 +9,8 @@ CONFIG_SPIRAM_SPEED_80M=y
 # Fast console so the ~1.9 MB hex dump finishes in ~30 s instead of ~3 min
 CONFIG_ESP_CONSOLE_UART_CUSTOM=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600
+# Run at full speed from now on (KWS inference needs it; also
+# makes "10% CPU" math consistent across all later phases)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # Keep log informative but not noisy
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
