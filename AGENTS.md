@@ -55,8 +55,16 @@ per call (see lesson 3).
       hangover), VU telemetry, BOOT 30 s capture preserved.
 - [x] Phase 2 — frontend bit-matched to numpy (max 6.6e-05, PASS), aes3 and
       ANSI kernels proven equivalent; ships aes3 at **1.04 ms/frame**.
-- [~] Phase 3 — dataset collection IN PROGRESS ("Jago Guru" positives via
-      dataset repo; negatives = Speech Commands + MUSAN; clip tool 3a pending).
+- [~] Phase 3 — dataset collection IN PROGRESS (9 speakers × 3 conditions,
+      ~920 "Jago Guru" utterances as 69×30 s takes; clip review ongoing via
+      dataset repo `clip_cutter.py`; negatives = Speech Commands + MUSAN).
+- [ ] Phase 4 — train DS-CNN on Kaggle (transfer-learn, DET/FA-hr eval).
+  NOTE: Arm ML-zoo is ARCHIVED (read-only since Jul 2025) — still usable
+  Apache-2.0, but pin the checkpoint commit; fallback = Keras rebuild from
+  Hello Edge table, reserve = micro-wake-word trainer. No local GPU here;
+  training runs on Kaggle. Feature extraction for training reuses
+  `ref_logmel` (vendored into dataset repo `scripts/frontend_check.py`;
+  keep copies in sync, re-run bit-match checker if params change).
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [ ] Phase 5 — int8 quant + `.tflite` embed.  [ ] Phase 6 — on-device KWS.
 - [ ] Phase 7 — pre-roll + WebSocket stream.  [ ] Phase 8 — faster-whisper
