@@ -87,6 +87,11 @@ per call (see lesson 3).
   NOTE: det_scaled.txt on disk differs from pasted run-3 table (different
   Kaggle run) - file is canonical for now; variance itself flags the
   single-speaker (sp09) test set as noisy. Still misses SIH bar.
+  UPDATE run-A vs run-B: user keeps both runs (_1 suffix = earlier). Run A
+  wins clearly - int8 acc 0.8917 vs 0.8692, DET raw thr0.7 FRR 12.9%@FAR
+  2.4% (thr0.8: 13.6%/1.7%). models/ now holds run-A artifacts (verified).
+  Lesson: identical-config retrains swing ~2 pts on this single-speaker
+  test set - never trust one table; on-device FA/hr is the real metric.
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [ ] Phase 5 — int8 quant + `.tflite` embed.  [ ] Phase 6 — on-device KWS.
 - [ ] Phase 7 — pre-roll + WebSocket stream.  [ ] Phase 8 — faster-whisper
