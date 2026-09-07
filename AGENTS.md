@@ -72,6 +72,10 @@ per call (see lesson 3).
   training runs on Kaggle. Feature extraction for training reuses
   `ref_logmel` (vendored into dataset repo `scripts/frontend_check.py`;
   keep copies in sync, re-run bit-match checker if params change).
+  UPDATE run-2: v2 fine-tune reached val 88%, test recall 87-89% all classes,
+  DET improved (FRR 11%@FAR 5.5% @thr0.5) but still misses bar. Notebook v3
+  adds temperature scaling + full-int8 PTQ cell. Artifacts to pull down:
+  jagoguru_int8.tflite, norm.npz, det_scaled.txt, threshold choice.
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [ ] Phase 5 — int8 quant + `.tflite` embed.  [ ] Phase 6 — on-device KWS.
 - [ ] Phase 7 — pre-roll + WebSocket stream.  [ ] Phase 8 — faster-whisper
