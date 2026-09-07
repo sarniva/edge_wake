@@ -23,15 +23,12 @@
  *  - every 500 ms: VU line (RMS / peak / dBFS / VAD state / ring fill %)
  *  - 5 s after boot: ring self-check (newest hop re-read from ring must
  *    match what was written, incl. wraparound later) -> "ring self-check OK"
- *  - BOOT short-press (or serial 'f'): fresh 1 s PCM -> 61x40 log-mel dump
+ *  - BOOT tap (or serial 'f'): fresh 1 s PCM -> 61x40 log-mel dump
  *    (FE_PCM_* + FE_MEL_* markers, %a exact floats) for
- *    scripts/frontend_check.py. Hold BOOT 1.5 s (or serial 'r'): fresh
- *    30 s record (480000 samples, 960 KB PSRAM buffer; PSRAM OCTAL @ 80 MHz
- *    required, see sdkconfig.defaults), stats + hex dump between
- *    AUD_DUMP_START / AUD_DUMP_END, framed by REC_START / REC_END.
- *    Console runs at 921600 baud so the ~1.9 MB dump takes ~30 s.
- *  - host scripts: capture.py converts a 30 s dump to sample.wav (sends
- *    'r' itself); frontend_check.py verifies the S3 mel against numpy.
+ *    scripts/frontend_check.py. (Long 30 s record-and-dump over PSRAM/UART
+ *    used to live here too; it moved to the edge_wake_dataset repo, so this
+ *    firmware uses no PSRAM at all.)
+ *  - host script scripts/frontend_check.py verifies the S3 mel against numpy.
  *
  * Conversion note: INMP441 data is 24-bit left-justified in a 32-bit slot
  * (raw = data << 8). raw >> 16 would be "correct" 16-bit but very quiet
@@ -76,8 +73,6 @@ static const char *TAG = "mic_test";
 #define HOP_SAMPLES       480         // 30 ms per processing hop at 16 kHz
 #define DMA_FRAMES        480         // one DMA buffer == one hop
 #define DMA_DESC_NUM      6
-#define REC_SECONDS       30
-#define REC_SAMPLES       (SAMPLE_RATE * REC_SECONDS)   // 480000 samples, 960 KB
 
 // ---- ring buffer (the future wake-word pre-roll) ----
 #define RING_SECONDS      2
@@ -244,25 +239,6 @@ static void print_stats(const char *label, const int16_t *pcm, int n)
     }
 }
 
-// Hex dump with markers for scripts/capture.py. Uses plain printf (no ESP_LOG
-// prefix) so the host parser stays trivial. 256 samples per line.
-static void dump_hex(const int16_t *pcm, int n)
-{
-    printf("AUD_DUMP_START samples=%d sr=%d bits=16 ch=1 shift=%d\n",
-           n, SAMPLE_RATE, GAIN_SHIFT);
-    const int per_line = 256;
-    for (int i = 0; i < n; i += per_line) {
-        int m = n - i < per_line ? n - i : per_line;
-        printf("AUD_DATA:");
-        for (int j = 0; j < m; j++) {
-            printf("%04x", (uint16_t)pcm[i + j]);
-        }
-        printf("\n");
-    }
-    printf("AUD_DUMP_END\n");
-    fflush(stdout);
-}
-
 // CRC32 (zlib polynomial) over PCM: proves the host parsed the same bytes
 // the S3 processed, ruling UART transport noise in or out definitively.
 static uint32_t pcm_crc32(const int16_t *pcm, int n)
@@ -281,7 +257,6 @@ static int16_t s_hop[HOP_SAMPLES];
 static int16_t s_check[HOP_SAMPLES];
 static int16_t s_trash[960];
 
-static int16_t *rec_buf = NULL;
 static int16_t *fe_pcm = NULL;   // 1 s scratch for frontend dumps (32 KB)
 static bool have_serial_cmd = false;
 
@@ -294,7 +269,6 @@ static inline float fe_prev_of(int f)
 }
 
 // Forward declarations (defined further below).
-static void do_capture(const char *why);
 static void fe_dump_1s(const char *why);
 static void fe_pow_dump(const char *why);
 
@@ -307,44 +281,10 @@ static void poll_serial_cmd(void)
     if (c == 'f') {
         ESP_LOGI(TAG, "serial cmd 'f' -> frontend dump");
         fe_dump_1s("serial");
-    } else if (c == 'r') {
-        ESP_LOGI(TAG, "serial cmd 'r' -> 30 s capture");
-        do_capture("serial");
     } else if (c == 'p') {
         ESP_LOGI(TAG, "serial cmd 'p' -> power-spectrum debug dump");
         fe_pow_dump("serial");
     }
-}
-
-static void do_capture(const char *why)
-{
-    ESP_LOGI(TAG, "=== capture (%s): recording %d s @ %d Hz mono ===",
-             why, REC_SECONDS, SAMPLE_RATE);
-    // flush DMA pipeline so the recording starts fresh
-    for (int i = 0; i < 4; i++) read_mono_block(s_trash, 480);
-    printf("REC_START seconds=%d\n", REC_SECONDS);
-
-    int filled = 0;
-    int64_t t0 = esp_timer_get_time();
-    while (filled < REC_SAMPLES) {
-        int want = REC_SAMPLES - filled;
-        if (want > 960) want = 960;
-        int got = read_mono_block(rec_buf + filled, want);
-        if (got <= 0) {
-            ESP_LOGW(TAG, "i2s read timeout at %d/%d", filled, REC_SAMPLES);
-            continue;
-        }
-        filled += got;
-    }
-    int64_t t1 = esp_timer_get_time();
-    ESP_LOGI(TAG, "recorded %d samples in %.2f s", filled,
-             (t1 - t0) / 1000000.0);
-    printf("REC_END samples=%d\n", filled);
-    print_stats("capture", rec_buf, filled);
-    dump_hex(rec_buf, filled);
-    ESP_LOGI(TAG, "dump done. Run: python3 scripts/capture.py "
-                  "--port /dev/ttyACM0 --baud 921600  (or parse existing log)");
-    ESP_LOGI(TAG, "resuming continuous listening loop");
 }
 
 // Fresh 1 s of PCM -> log-mel frames -> exact-float dump for
@@ -485,13 +425,13 @@ void app_main(void)
     gpio_set_direction(PIN_BUTTON, GPIO_MODE_INPUT);
     gpio_set_pull_mode(PIN_BUTTON, GPIO_PULLUP_ONLY);
 
-    // Serial single-char commands: 'f' = 1 s frontend dump, 'r' = 30 s capture.
+    // Serial single-char commands: 'f' = 1 s frontend dump, 'p' = power dump.
     // Non-blocking; if the UART VFS refuses, buttons remain the fallback.
     int fl = fcntl(STDIN_FILENO, F_GETFL, 0);
     if (fl >= 0 && fcntl(STDIN_FILENO, F_SETFL, fl | O_NONBLOCK) == 0) {
         have_serial_cmd = true;
     }
-    ESP_LOGI(TAG, "serial commands %s", have_serial_cmd ? "ON ('f'/'r')" : "OFF (buttons only)");
+    ESP_LOGI(TAG, "serial commands %s", have_serial_cmd ? "ON ('f'/'p')" : "OFF (buttons only)");
 
     i2s_init();
     fe_init();
@@ -500,17 +440,12 @@ void app_main(void)
     ring_buf = heap_caps_malloc(RING_SAMPLES * sizeof(int16_t),
                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!ring_buf) { ESP_LOGE(TAG, "cannot allocate %u-byte ring", (unsigned)(RING_SAMPLES * 2)); return; }
-    // 30 s dataset buffer: PSRAM if present, else internal (won't fit 960 KB).
-    rec_buf = heap_caps_malloc(REC_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!rec_buf) rec_buf = heap_caps_malloc(REC_SAMPLES * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!rec_buf) rec_buf = malloc(REC_SAMPLES * sizeof(int16_t));
-    if (!rec_buf) { ESP_LOGE(TAG, "cannot allocate %u-byte rec buffer", (unsigned)(REC_SAMPLES * 2)); return; }
     // 1 s frontend scratch: internal (hot path).
     fe_pcm = heap_caps_malloc(FE_SR * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!fe_pcm) fe_pcm = malloc(FE_SR * sizeof(int16_t));
     if (!fe_pcm) { ESP_LOGE(TAG, "cannot allocate fe buffer"); return; }
-    ESP_LOGI(TAG, "ring %u KB internal, rec buffer %u KB @ %p",
-             (unsigned)(RING_SAMPLES * 2 / 1024), (unsigned)(REC_SAMPLES * 2 / 1024), rec_buf);
+    ESP_LOGI(TAG, "ring %u KB internal, all buffers internal (no PSRAM use)",
+             (unsigned)(RING_SAMPLES * 2 / 1024));
 
     int btn_prev = 1;
     int64_t t_boot = esp_timer_get_time();
@@ -518,7 +453,7 @@ void app_main(void)
     bool selfcheck_done = false;
     int vu_peak_max = 0;
 
-    ESP_LOGI(TAG, "listening... VAD flips on speech; BOOT short-press = mel dump, hold 1.5 s = 30 s capture; serial 'f'/'r' same");
+    ESP_LOGI(TAG, "listening... VAD flips on speech; BOOT = mel dump; serial 'f'/'p' same");
     while (1) {
         poll_serial_cmd();
         int got = read_mono_block(s_hop, HOP_SAMPLES);
@@ -572,21 +507,9 @@ void app_main(void)
 
         int btn = gpio_get_level(PIN_BUTTON);
         if (btn_prev == 1 && btn == 0) {
-            int64_t t_press = esp_timer_get_time();
             vTaskDelay(pdMS_TO_TICKS(50));  // debounce
             if (gpio_get_level(PIN_BUTTON) != 0) { btn_prev = 1; continue; }
-            // Distinguish tap vs hold. I2S overflows while we wait — harmless,
-            // both actions flush the pipeline first.
-            bool hold = false;
-            while (gpio_get_level(PIN_BUTTON) == 0) {
-                if (esp_timer_get_time() - t_press > 1500000) { hold = true; break; }
-                vTaskDelay(pdMS_TO_TICKS(20));
-            }
-            if (hold) {
-                do_capture("button-hold");
-            } else {
-                fe_dump_1s("button");
-            }
+            fe_dump_1s("button");
             while (gpio_get_level(PIN_BUTTON) == 0) vTaskDelay(pdMS_TO_TICKS(20));
             btn_prev = 1;
             last_vu = esp_timer_get_time();

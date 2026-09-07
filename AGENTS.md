@@ -29,15 +29,16 @@ main/mic_capture.c   orchestrator: I2S, ring, VAD, VU, buttons/serial cmds, dump
 main/frontend.c/.h   log-mel frontend (frozen params below), esp-dsp FFT
 main/CMakeLists.txt  + PRIV_REQUIRES espressif__esp-dsp
 main/idf_component.yml  pins esp-dsp (managed_components/ is gitignored)
-scripts/capture.py       30 s dump -> sample.wav, live phase narration
 scripts/frontend_check.py  S3 mel vs numpy bit-match checker (PASS bar < 0.05)
-sdkconfig.defaults    source of truth (target/PSRAM/console/CPU/stack/DSP size)
-sample.wav            reference capture (committed on purpose, used by checks)
+sdkconfig.defaults    source of truth (target/console/CPU/stack/DSP size; NO PSRAM use)
+sample.wav            legacy reference capture (kept as test audio; unused by checks)
 ```
 
 Sibling `edge_wake_dataset/` repo: separate field-recorder firmware (native
 USB, boot auto-take, BOOT takes, CRC) + `capture_takes.py`. Dataset takes
-live there / with the dataset, NOT in this repo.
+live there / with the dataset, NOT in this repo. The 30 s PSRAM
+record-and-dump path was REMOVED from this firmware (it lives only in the
+dataset repo now); this firmware uses internal RAM only, no PSRAM.
 
 ## Frozen DSP params (change in BOTH frontend.h AND frontend_check.py, re-verify)
 
@@ -55,6 +56,9 @@ per call (see lesson 3).
       hangover), VU telemetry, BOOT 30 s capture preserved.
 - [x] Phase 2 — frontend bit-matched to numpy (max 6.6e-05, PASS), aes3 and
       ANSI kernels proven equivalent; ships aes3 at **1.04 ms/frame**.
+- [x] Cleanup — 30 s PSRAM record-and-dump path removed from this firmware
+      (`do_capture`, `dump_hex`, `rec_buf`, AUD_* markers, `scripts/capture.py`
+      all deleted); BOOT = mel dump only, serial cmds `f`/`p` only.
 - [~] Phase 3 — dataset collection IN PROGRESS (9 speakers × 3 conditions,
       ~920 "Jago Guru" utterances as 69×30 s takes; clip review ongoing via
       dataset repo `clip_cutter.py`; negatives = Speech Commands + MUSAN).
@@ -76,11 +80,10 @@ per call (see lesson 3).
 ```bash
 idf.py set-target esp32s3 && idf.py build && idf.py -p /dev/ttyACM0 flash
 idf.py -p /dev/ttyACM0 monitor        # buzzy at 921600 console baud
-python scripts/capture.py --port /dev/ttyACM0 --baud 921600 --timeout 150
 python scripts/frontend_check.py --port /dev/ttyACM0 --baud 921600
 ```
 Serial cmds (UART port only; native-USB writes stall): `f` = 1 s mel dump,
-`r` = 30 s capture. BOOT: tap = mel dump, hold 1.5 s = 30 s capture.
+`p` = power-spectrum debug dump. BOOT: tap = mel dump.
 
 ## Hard lessons (do not relearn)
 
