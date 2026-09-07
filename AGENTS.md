@@ -80,6 +80,13 @@ per call (see lesson 3).
   at 11% - model under-confident on true wake. §8 eval had batch-dim bug
   (export froze batch=1; fixed via resize_tensor_input). Next: hard-negative
   mining from high-firing GSC words, then focal loss if needed.
+  UPDATE artifacts pulled: models/jagoguru_int8.tflite (51.7 KB, int8 61x40x1
+  in / 1x3 out) + norm.npz (z-norm mu/sd) in dataset repo. Local int8 eval
+  reproduces Kaggle exactly (0.8692). Local int8 DET (raw): FRR 10.6%@FAR
+  6.7% @thr0.5; FRR 13.6%@FAR 3.3% @thr0.7. Start firmware threshold 0.7.
+  NOTE: det_scaled.txt on disk differs from pasted run-3 table (different
+  Kaggle run) - file is canonical for now; variance itself flags the
+  single-speaker (sp09) test set as noisy. Still misses SIH bar.
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [ ] Phase 5 — int8 quant + `.tflite` embed.  [ ] Phase 6 — on-device KWS.
 - [ ] Phase 7 — pre-roll + WebSocket stream.  [ ] Phase 8 — faster-whisper
