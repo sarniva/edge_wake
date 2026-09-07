@@ -62,7 +62,10 @@ per call (see lesson 3).
 - [~] Phase 3 — dataset collection IN PROGRESS (9 speakers × 3 conditions,
       ~920 "Jago Guru" utterances as 69×30 s takes; clip review ongoing via
       dataset repo `clip_cutter.py`; negatives = Speech Commands + MUSAN).
-- [ ] Phase 4 — train DS-CNN on Kaggle (transfer-learn, DET/FA-hr eval).
+- [~] Phase 4 — Kaggle: GSC-35 pretrain hit 90.4% val (DS-CNN-S, 25.8K params);
+      linear-probe fine-tune stalled (val ~0.82, DET badly missed bar:
+      FRR 19% @ FAR 11% at thr 0.5). Notebook v2: stronger head, full
+      unfreeze, wake augmentation (noise/shift/specaug), Keras 3 export fix.
   NOTE: Arm ML-zoo is ARCHIVED (read-only since Jul 2025) — still usable
   Apache-2.0, but pin the checkpoint commit; fallback = Keras rebuild from
   Hello Edge table, reserve = micro-wake-word trainer. No local GPU here;
