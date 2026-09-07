@@ -76,6 +76,10 @@ per call (see lesson 3).
   DET improved (FRR 11%@FAR 5.5% @thr0.5) but still misses bar. Notebook v3
   adds temperature scaling + full-int8 PTQ cell. Artifacts to pull down:
   jagoguru_int8.tflite, norm.npz, det_scaled.txt, threshold choice.
+  UPDATE run-3: T=1.5 halves FAR (3.8%@thr0.5, 1.4%@thr0.7) but FRR stuck
+  at 11% - model under-confident on true wake. §8 eval had batch-dim bug
+  (export froze batch=1; fixed via resize_tensor_input). Next: hard-negative
+  mining from high-firing GSC words, then focal loss if needed.
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [ ] Phase 5 — int8 quant + `.tflite` embed.  [ ] Phase 6 — on-device KWS.
 - [ ] Phase 7 — pre-roll + WebSocket stream.  [ ] Phase 8 — faster-whisper
