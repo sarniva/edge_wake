@@ -93,6 +93,16 @@ per call (see lesson 3).
   Lesson: identical-config retrains swing ~2 pts on this single-speaker
   test set - never trust one table; on-device FA/hr is the real metric.
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
+- [x] Phase 6 (bring-up) — on-device KWS works: run-A int8 embedded via xxd,
+      esp-tflite-micro 1.4.0 + ESP-NN + led_strip, 4 Hz full-window inference,
+      thr 0.7 2/3 vote + 1.5 s debounce -> RGB LED + WAKE log. First light:
+      idle p~0.01, WAKE p=0.76-0.99 on utterances. Arena 91.5/96 KB internal;
+      ring 64 + fe 32 KB internal (alloc order: big blocks before I2S DMA).
+  NOTE: resolver needs AddMean (converter emits MEAN for GAP, not AvgPool).
+  OPEN: per-cycle cost fe 63.5 ms + invoke 110.5 ms = ~70% core (over budget;
+  next = incremental frontend + invoke profiling). Run-A forensics closed:
+  det_scaled_1.txt reproduced locally from its own artifacts (int8-vs-fp32
+  jitter only) - run A healthy, canonical.
 - [ ] Phase 5 — int8 quant + `.tflite` embed.  [ ] Phase 6 — on-device KWS.
 - [ ] Phase 7 — pre-roll + WebSocket stream.  [ ] Phase 8 — faster-whisper
       server (laptop has GTX 2050 4 GB + i5/8 GB; use CUDA).
