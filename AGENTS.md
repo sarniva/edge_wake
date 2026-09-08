@@ -99,6 +99,10 @@ per call (see lesson 3).
   for hits). Fix = gain augmentation (0.3-1.5x), NOT more negatives.
   v5 recipe: warm-start run-A weights if downloadable (else GSC stem),
   gain aug, gentler mining (top500 x2), same schedule.
+  UPDATE v4 on-device verdict: user-tested WORSE than run-A -> reverted on
+  master (2cc2416), v4 commit preserved on branch model-v4 (note: no space,
+  git-unfriendly otherwise). Run-A firmware reflashed + verified alive.
+  v5 prompt saved at dataset repo V5_PROMPT.md (paste into fresh session).
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [x] Phase 6 (bring-up) — on-device KWS works: run-A int8 embedded via xxd,
       esp-tflite-micro 1.4.0 + ESP-NN + led_strip, 4 Hz full-window inference,
