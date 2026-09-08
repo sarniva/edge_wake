@@ -16,9 +16,11 @@ bool kws_init(void);
 
 // Run one inference on a 61x40 log-mel frame buffer (row-major float).
 // Applies training z-norm + int8 quantization internally.
-// Returns wake posterior 0..1 (or -1.0 on invoke failure).
+// Fills out[3] = {silence, unknown, wake} posteriors (dequantized).
+// Returns wake posterior (or -1.0 on invoke failure).
 // invoke_us (optional, may be NULL) receives Invoke() time in microseconds.
-float kws_infer(const float mel[61][40], int64_t *invoke_us);
+float kws_infer(const float mel[61][40], float out[KWS_N_CLASSES],
+                int64_t *invoke_us);
 
 #ifdef __cplusplus
 }

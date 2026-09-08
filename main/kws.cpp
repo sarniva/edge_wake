@@ -92,7 +92,8 @@ bool kws_init(void) {
     return true;
 }
 
-float kws_infer(const float mel[61][40], int64_t *invoke_us) {
+float kws_infer(const float mel[61][40], float out[KWS_N_CLASSES],
+                int64_t *invoke_us) {
     if (!s_interp) return -1.0f;
     // z-norm (training stats) + quantize into the input tensor
     int8_t *dst = s_input->data.int8;
@@ -112,6 +113,8 @@ float kws_infer(const float mel[61][40], int64_t *invoke_us) {
     }
     int64_t t1 = esp_timer_get_time();
     if (invoke_us) *invoke_us = t1 - t0;
-    int8_t qw = s_output->data.int8[KWS_CLASS_WAKE];
-    return (qw - s_out_zp) * s_out_scale;  // ≈ softmax posterior 0..1
+    for (int i = 0; i < KWS_N_CLASSES; i++) {
+        out[i] = (s_output->data.int8[i] - s_out_zp) * s_out_scale;
+    }
+    return out[KWS_CLASS_WAKE];
 }

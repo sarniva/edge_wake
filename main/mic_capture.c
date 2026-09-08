@@ -182,8 +182,12 @@ static uint32_t ring_fill_pct(void)
     return (100 * f) / RING_SAMPLES;
 }
 
-// ---- KWS decision (2-of-3 voting + debounce + VAD gate, thr from DET) ----
+// ---- KWS decision (thr + margin + 2-of-3 voting + debounce + VAD gate) ----
+// Margin rule: non-wake speech often scores p_wake moderately BUT also
+// scores p_unknown highly; true wake stands alone. Requiring a margin kills
+// most speech false-fires that an absolute threshold lets through.
 #define KWS_THRESHOLD     0.7f
+#define KWS_MARGIN        0.3f   // p_wake - max(p_sil, p_unk) must exceed this
 #define KWS_VOTES         3
 #define KWS_MIN_HITS      2
 #define KWS_DEBOUNCE_US   1500000
@@ -338,23 +342,28 @@ static void kws_cycle(int64_t now)
     }
     int64_t t1 = esp_timer_get_time();
     int64_t inv_us = 0;
-    float p = kws_infer(s_mel_win, &inv_us);
+    float probs[KWS_N_CLASSES];
+    float p = kws_infer(s_mel_win, probs, &inv_us);
+    float p_unk = probs[1] > probs[0] ? probs[1] : probs[0];
+    float margin = p - p_unk;
+    // A vote needs BOTH absolute confidence and daylight vs runner-up.
+    float vote = (p >= KWS_THRESHOLD && margin >= KWS_MARGIN) ? 1.0f : 0.0f;
     s_fe_us_sum += (uint64_t)(t1 - t0);
     s_inv_us_sum += (uint64_t)(inv_us > 0 ? inv_us : 0);
     s_inf_count++;
 
     if (p < 0) return;  // invoke failed; error already logged
-    s_votes[s_vote_idx] = p;
+    s_votes[s_vote_idx] = vote;
     s_vote_idx = (s_vote_idx + 1) % KWS_VOTES;
     int hits = 0;
     for (int i = 0; i < KWS_VOTES; i++) {
-        if (s_votes[i] >= KWS_THRESHOLD) hits++;
+        if (s_votes[i] >= 0.5f) hits++;
     }
     // Trace anything suspicious (max 4 lines/s): silence sits at ~0.01,
-    // so anything here deserves a look. This is also how you watch the
-    // detector react live when you speak.
+    // so anything here deserves a look. Full vector shows WHY it fired.
     if (p >= KWS_TRACE_P) {
-        ESP_LOGI(TAG, "kws? p=%.3f t=%.2fs", (double)p,
+        ESP_LOGI(TAG, "kws? w=%.3f u=%.3f s=%.3f t=%.2fs", (double)p,
+                 (double)probs[1], (double)probs[0],
                  (double)now / 1000000.0);
     }
     if (s_inf_count % 40 == 0) {
@@ -564,7 +573,7 @@ void app_main(void)
     fe_init();
     led_init();
     s_kws_ok = kws_init();
-    ESP_LOGI(TAG, "kws %s", s_kws_ok ? "ARMED (thr 0.7, 2/3 vote, 4 Hz)" : "OFF (init failed)");
+    ESP_LOGI(TAG, "kws %s", s_kws_ok ? "ARMED (thr 0.7 + margin 0.3, 2/3 vote, 4 Hz)" : "OFF (init failed)");
 
     int btn_prev = 1;
     int64_t t_boot = esp_timer_get_time();
