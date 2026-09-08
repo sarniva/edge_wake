@@ -92,6 +92,13 @@ per call (see lesson 3).
   2.4% (thr0.8: 13.6%/1.7%). models/ now holds run-A artifacts (verified).
   Lesson: identical-config retrains swing ~2 pts on this single-speaker
   test set - never trust one table; on-device FA/hr is the real metric.
+  UPDATE v4 (hard-neg mining) REGRESSED - do NOT ship: int8 0.8728, DET
+  thr0.5 FRR 13.6%/FAR 5.0%. Local model-vs-model: v4 misses every clip
+  run-A misses (15/15 shared) +1 more - mining fixed zero wake misses.
+  Forensics: missed clips are systematically QUIET (49% bins <-14dB vs 5%
+  for hits). Fix = gain augmentation (0.3-1.5x), NOT more negatives.
+  v5 recipe: warm-start run-A weights if downloadable (else GSC stem),
+  gain aug, gentler mining (top500 x2), same schedule.
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [x] Phase 6 (bring-up) — on-device KWS works: run-A int8 embedded via xxd,
       esp-tflite-micro 1.4.0 + ESP-NN + led_strip, 4 Hz full-window inference,
