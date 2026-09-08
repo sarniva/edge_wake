@@ -103,6 +103,10 @@ per call (see lesson 3).
   next = incremental frontend + invoke profiling). Run-A forensics closed:
   det_scaled_1.txt reproduced locally from its own artifacts (int8-vs-fp32
   jitter only) - run A healthy, canonical.
+  FIXED false-fire storm: 10 WAKEs/75 s in a non-speaking room = per-window
+  test FAR (~2%) becomes hundreds/hr continuous. Added VAD gate (WAKE needs
+  speech within 1.5 s, suppressions logged) + kws? trace (p>=0.25) for live
+  visibility. Post-gate: 0 fires/60 s, trace peaks ~0.59 on room noise.
 - [ ] Phase 5 — int8 quant + `.tflite` embed.  [ ] Phase 6 — on-device KWS.
 - [ ] Phase 7 — pre-roll + WebSocket stream.  [ ] Phase 8 — faster-whisper
       server (laptop has GTX 2050 4 GB + i5/8 GB; use CUDA).
