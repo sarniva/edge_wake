@@ -107,6 +107,12 @@ per call (see lesson 3).
   test FAR (~2%) becomes hundreds/hr continuous. Added VAD gate (WAKE needs
   speech within 1.5 s, suppressions logged) + kws? trace (p>=0.25) for live
   visibility. Post-gate: 0 fires/60 s, trace peaks ~0.59 on room noise.
+  USER TESTS (margin rule live): fan-only 60 s -> 1 FA (w=0.73); 5x Jago Guru
+  @1m -> 5/5 detected (p 0.94-0.99) + 2 extra fires; Bengali YouTube @1m ->
+  ~7 fires/55 s (w 0.77-0.99, u~0.0). Root cause of Bengali FAs: 'jago' IS a
+  Bengali word; GSC-English unknowns never taught otherwise. Fix = hard-
+  negative mining with Bengali/Hindi speech, not thresholds (margin/thr
+  can't stop 0.9+ confident misclassifications).
 - [ ] Phase 5 — int8 quant + `.tflite` embed.  [ ] Phase 6 — on-device KWS.
 - [ ] Phase 7 — pre-roll + WebSocket stream.  [ ] Phase 8 — faster-whisper
       server (laptop has GTX 2050 4 GB + i5/8 GB; use CUDA).
