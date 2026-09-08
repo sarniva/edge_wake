@@ -1,7 +1,9 @@
 /*
- * edge_wake phase 2: continuous listening + log-mel frontend.
+ * edge_wake phase 6: continuous listening + log-mel frontend + on-device KWS.
  * INMP441 -> ESP32-S3 I2S -> 16 kHz mono PCM -> circular ring buffer
- * -> per-hop energy VAD + live VU + on-device log-mel (esp-dsp FFT).
+ * -> per-hop energy VAD + live VU + on-device log-mel (esp-dsp FFT)
+ * -> run-A int8 DS-CNN-S (esp-tflite-micro + ESP-NN) at 4 Hz
+ * -> 2-of-3 voting + 1.5 s debounce -> RGB LED + WAKE log.
  *
  * Wiring (INMP441 breakout -> ESP32-S3 DevKit):
  *   VDD -> 3V3        (NEVER 5V)
@@ -55,7 +57,9 @@
 #include "esp_timer.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
+#include "led_strip.h"
 #include "frontend.h"
+#include "kws.h"
 
 static const char *TAG = "mic_test";
 
@@ -178,6 +182,40 @@ static uint32_t ring_fill_pct(void)
     return (100 * f) / RING_SAMPLES;
 }
 
+// ---- KWS decision (2-of-3 voting + 1.5 s debounce, thr from DET table) ----
+#define KWS_THRESHOLD     0.7f
+#define KWS_VOTES         3
+#define KWS_MIN_HITS      2
+#define KWS_DEBOUNCE_US   1500000
+#define KWS_PERIOD_US     250000   // 4 inferences/s
+
+#define LED_GPIO          48       // DevKitC-1 addressable RGB LED
+static led_strip_handle_t s_led = NULL;
+
+static void led_set(uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!s_led) return;
+    led_strip_set_pixel(s_led, 0, r, g, b);
+    led_strip_refresh(s_led);
+}
+
+static void led_init(void)
+{
+    led_strip_config_t cfg = {
+        .strip_gpio_num = LED_GPIO,
+        .max_leds = 1,
+    };
+    led_strip_rmt_config_t rmt = {
+        .resolution_hz = 10 * 1000 * 1000,
+    };
+    if (led_strip_new_rmt_device(&cfg, &rmt, &s_led) != ESP_OK) {
+        ESP_LOGW(TAG, "no addressable LED @ GPIO%d (logs still work)", LED_GPIO);
+        s_led = NULL;
+        return;
+    }
+    led_set(0, 16, 0);  // dim green = listening
+}
+
 // ---- VAD ----
 typedef enum { VAD_SILENCE = 0, VAD_SPEECH = 1 } vad_state_t;
 static vad_state_t vad_state = VAD_SILENCE;
@@ -272,6 +310,62 @@ static inline float fe_prev_of(int f)
 static void fe_dump_1s(const char *why);
 static void fe_pow_dump(const char *why);
 
+// Shared 61x40 inference window (file-static, NOT stack: ~10 KB).
+// fe_dump_1s and the KWS loop both use it, never concurrently.
+static float s_mel_win[FE_NFRAMES_1S][FE_NMELS];
+
+// KWS runtime state.
+static bool s_kws_ok = false;
+static float s_votes[KWS_VOTES];
+static int s_vote_idx = 0;
+static int64_t s_last_wake_us = 0;
+static int64_t s_last_inf_us = 0;
+static int s_inf_count = 0;
+static uint64_t s_fe_us_sum = 0, s_inv_us_sum = 0;
+static int64_t s_wake_until_us = 0;
+
+// One full KWS cycle: newest 1 s from ring -> 61 mel frames -> infer ->
+// vote -> WAKE action. Called at 4 Hz from the main loop.
+static void kws_cycle(int64_t now)
+{
+    ring_newest(fe_pcm, FE_SR);
+    int64_t t0 = esp_timer_get_time();
+    for (int f = 0; f < FE_NFRAMES_1S; f++) {
+        fe_frame(fe_pcm + f * FE_HOP, fe_prev_of(f), NULL, s_mel_win[f]);
+    }
+    int64_t t1 = esp_timer_get_time();
+    int64_t inv_us = 0;
+    float p = kws_infer(s_mel_win, &inv_us);
+    s_fe_us_sum += (uint64_t)(t1 - t0);
+    s_inv_us_sum += (uint64_t)(inv_us > 0 ? inv_us : 0);
+    s_inf_count++;
+
+    if (p < 0) return;  // invoke failed; error already logged
+    s_votes[s_vote_idx] = p;
+    s_vote_idx = (s_vote_idx + 1) % KWS_VOTES;
+    int hits = 0;
+    for (int i = 0; i < KWS_VOTES; i++) {
+        if (s_votes[i] >= KWS_THRESHOLD) hits++;
+    }
+    if (s_inf_count % 40 == 0) {
+        ESP_LOGI(TAG, "kws #%d: p=%.3f fe=%.1fms inv=%.1fms (avg)",
+                 s_inf_count, (double)p,
+                 (double)s_fe_us_sum / s_inf_count / 1000.0,
+                 (double)s_inv_us_sum / s_inf_count / 1000.0);
+    }
+    if (hits >= KWS_MIN_HITS && now - s_last_wake_us > KWS_DEBOUNCE_US) {
+        s_last_wake_us = now;
+        s_wake_until_us = now + 600000;
+        led_set(64, 0, 0);
+        ESP_LOGI(TAG, "WAKE p=%.3f votes=%d/3 t=%.2fs",
+                 (double)p, hits, (double)now / 1000000.0);
+    }
+    if (s_wake_until_us && now > s_wake_until_us) {
+        s_wake_until_us = 0;
+        led_set(0, 16, 0);
+    }
+}
+
 static void poll_serial_cmd(void)
 {
     if (!have_serial_cmd) return;
@@ -320,15 +414,14 @@ static void fe_dump_1s(const char *why)
     printf("FE_MEL_START frames=%d mels=%d\n", nf, FE_NMELS);
     // Compute first (timed, no prints), dump after: the ms/frame number is
     // honest CPU cost, not UART time. Matches future KWS flow.
-    static float mel_all[FE_NFRAMES_1S][FE_NMELS];
     int64_t t0 = esp_timer_get_time();
     for (int f = 0; f < nf; f++) {
-        fe_frame(fe_pcm + f * FE_HOP, fe_prev_of(f), NULL, mel_all[f]);
+        fe_frame(fe_pcm + f * FE_HOP, fe_prev_of(f), NULL, s_mel_win[f]);
     }
     int64_t t1 = esp_timer_get_time();
     for (int f = 0; f < nf; f++) {
         printf("FE_MEL:");
-        for (int m = 0; m < FE_NMELS; m++) printf(" %a", (double)mel_all[f][m]);
+        for (int m = 0; m < FE_NMELS; m++) printf(" %a", (double)s_mel_win[f][m]);
         printf("\n");
     }
     printf("FE_MEL_END\n");
@@ -419,8 +512,9 @@ static void fe_pow_dump(const char *why)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "edge_wake phase2 boot. heap internal=%u",
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    ESP_LOGI(TAG, "edge_wake phase2 boot. heap internal=%u largest=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
     gpio_set_direction(PIN_BUTTON, GPIO_MODE_INPUT);
     gpio_set_pull_mode(PIN_BUTTON, GPIO_PULLUP_ONLY);
@@ -433,10 +527,9 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "serial commands %s", have_serial_cmd ? "ON ('f'/'p')" : "OFF (buttons only)");
 
-    i2s_init();
-    fe_init();
-
-    // Ring lives in internal RAM (hot path, DMA-adjacent, future pre-roll).
+    // Big buffers FIRST (unfragmented heap): ring 64 KB + fe 32 KB before
+    // the I2S driver carves its DMA chunks. Ring lives in internal RAM
+    // (hot path, DMA-adjacent, future pre-roll).
     ring_buf = heap_caps_malloc(RING_SAMPLES * sizeof(int16_t),
                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!ring_buf) { ESP_LOGE(TAG, "cannot allocate %u-byte ring", (unsigned)(RING_SAMPLES * 2)); return; }
@@ -444,8 +537,15 @@ void app_main(void)
     fe_pcm = heap_caps_malloc(FE_SR * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!fe_pcm) fe_pcm = malloc(FE_SR * sizeof(int16_t));
     if (!fe_pcm) { ESP_LOGE(TAG, "cannot allocate fe buffer"); return; }
-    ESP_LOGI(TAG, "ring %u KB internal, all buffers internal (no PSRAM use)",
-             (unsigned)(RING_SAMPLES * 2 / 1024));
+    ESP_LOGI(TAG, "ring %u KB + fe 32 KB internal, largest free now %u",
+             (unsigned)(RING_SAMPLES * 2 / 1024),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+    i2s_init();
+    fe_init();
+    led_init();
+    s_kws_ok = kws_init();
+    ESP_LOGI(TAG, "kws %s", s_kws_ok ? "ARMED (thr 0.7, 2/3 vote, 4 Hz)" : "OFF (init failed)");
 
     int btn_prev = 1;
     int64_t t_boot = esp_timer_get_time();
@@ -456,6 +556,14 @@ void app_main(void)
     ESP_LOGI(TAG, "listening... VAD flips on speech; BOOT = mel dump; serial 'f'/'p' same");
     while (1) {
         poll_serial_cmd();
+        int64_t now = esp_timer_get_time();
+        // KWS at 4 Hz (full-window recompute for bring-up; incremental later).
+        if (s_kws_ok && now - s_last_inf_us >= KWS_PERIOD_US &&
+            ring_write >= (uint32_t)FE_SR) {
+            s_last_inf_us = now;
+            kws_cycle(now);
+            now = esp_timer_get_time();
+        }
         int got = read_mono_block(s_hop, HOP_SAMPLES);
         if (got != HOP_SAMPLES) {
             ESP_LOGW(TAG, "short hop: %d/%d (I2S underrun?)", got, HOP_SAMPLES);
@@ -473,7 +581,7 @@ void app_main(void)
                      rms, (esp_timer_get_time() - t_boot) / 1000000.0);
         }
 
-        int64_t now = esp_timer_get_time();
+        now = esp_timer_get_time();
         if (now - last_vu > 500000) {
             last_vu = now;
             long long sumsq = 0; int peak = 0;
