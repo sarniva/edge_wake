@@ -182,12 +182,14 @@ static uint32_t ring_fill_pct(void)
     return (100 * f) / RING_SAMPLES;
 }
 
-// ---- KWS decision (2-of-3 voting + 1.5 s debounce, thr from DET table) ----
+// ---- KWS decision (2-of-3 voting + debounce + VAD gate, thr from DET) ----
 #define KWS_THRESHOLD     0.7f
 #define KWS_VOTES         3
 #define KWS_MIN_HITS      2
 #define KWS_DEBOUNCE_US   1500000
 #define KWS_PERIOD_US     250000   // 4 inferences/s
+#define KWS_VAD_FRESH_US  1500000  // WAKE needs speech within last 1.5 s
+#define KWS_TRACE_P       0.25f    // log any posterior above this (visibility)
 
 #define LED_GPIO          48       // DevKitC-1 addressable RGB LED
 static led_strip_handle_t s_led = NULL;
@@ -320,6 +322,7 @@ static float s_votes[KWS_VOTES];
 static int s_vote_idx = 0;
 static int64_t s_last_wake_us = 0;
 static int64_t s_last_inf_us = 0;
+static int64_t s_last_speech_us = 0;  // freshest hop with VAD==SPEECH
 static int s_inf_count = 0;
 static uint64_t s_fe_us_sum = 0, s_inv_us_sum = 0;
 static int64_t s_wake_until_us = 0;
@@ -347,23 +350,39 @@ static void kws_cycle(int64_t now)
     for (int i = 0; i < KWS_VOTES; i++) {
         if (s_votes[i] >= KWS_THRESHOLD) hits++;
     }
+    // Trace anything suspicious (max 4 lines/s): silence sits at ~0.01,
+    // so anything here deserves a look. This is also how you watch the
+    // detector react live when you speak.
+    if (p >= KWS_TRACE_P) {
+        ESP_LOGI(TAG, "kws? p=%.3f t=%.2fs", (double)p,
+                 (double)now / 1000000.0);
+    }
     if (s_inf_count % 40 == 0) {
         ESP_LOGI(TAG, "kws #%d: p=%.3f fe=%.1fms inv=%.1fms (avg)",
                  s_inf_count, (double)p,
                  (double)s_fe_us_sum / s_inf_count / 1000.0,
                  (double)s_inv_us_sum / s_inf_count / 1000.0);
     }
-    if (hits >= KWS_MIN_HITS && now - s_last_wake_us > KWS_DEBOUNCE_US) {
-        s_last_wake_us = now;
-        s_wake_until_us = now + 600000;
-        led_set(64, 0, 0);
-        ESP_LOGI(TAG, "WAKE p=%.3f votes=%d/3 t=%.2fs",
-                 (double)p, hits, (double)now / 1000000.0);
+    if (hits < KWS_MIN_HITS || now - s_last_wake_us <= KWS_DEBOUNCE_US) {
+        if (s_wake_until_us && now > s_wake_until_us) {
+            s_wake_until_us = 0;
+            led_set(0, 16, 0);
+        }
+        return;
     }
-    if (s_wake_until_us && now > s_wake_until_us) {
-        s_wake_until_us = 0;
-        led_set(0, 16, 0);
+    // VAD gate: per-window test FAR becomes hundreds of FA/hr on continuous
+    // audio; genuine wake words always overlap speech energy. Suppressions
+    // are logged (diagnostic gold for tuning the gate).
+    if (now - s_last_speech_us > KWS_VAD_FRESH_US) {
+        ESP_LOGI(TAG, "wake SUPPRESSED p=%.3f (no VAD speech for %.1fs)",
+                 (double)p, (double)(now - s_last_speech_us) / 1000000.0);
+        return;
     }
+    s_last_wake_us = now;
+    s_wake_until_us = now + 600000;
+    led_set(64, 0, 0);
+    ESP_LOGI(TAG, "WAKE p=%.3f votes=%d/3 t=%.2fs",
+             (double)p, hits, (double)now / 1000000.0);
 }
 
 static void poll_serial_cmd(void)
@@ -579,6 +598,11 @@ void app_main(void)
             ESP_LOGI(TAG, "VAD: -> %s (rms=%d, t=%.2fs)",
                      vad_state == VAD_SPEECH ? "SPEECH" : "SILENCE",
                      rms, (esp_timer_get_time() - t_boot) / 1000000.0);
+        }
+        // Freshness source for the KWS VAD gate (updated every hop, not
+        // just on transitions, so long utterances don't go stale).
+        if (vad_state == VAD_SPEECH) {
+            s_last_speech_us = now;
         }
 
         now = esp_timer_get_time();
