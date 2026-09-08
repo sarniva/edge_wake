@@ -113,6 +113,12 @@ per call (see lesson 3).
   Bengali word; GSC-English unknowns never taught otherwise. Fix = hard-
   negative mining with Bengali/Hindi speech, not thresholds (margin/thr
   can't stop 0.9+ confident misclassifications).
+  HARD-NEG SOURCES (dataset repo ext/, all CC-BY-4.0, transcripts mined for
+  guru/jaguar-like words): Kathbath bn test (2.8k clips/20 spk, 19 guru +
+  jaguar hits), OpenSLR asr_bengali shards _0+_1+_2 (41k clips, 98 local
+  transcript hits), Common Voice Hindi (1.7k clips + data.json, 6 hits).
+  Full OpenSLR set is 16 shards - only pull more if v4 DET still leaks
+  Bengali after mining with these three.
 - [ ] Phase 5 — int8 quant + `.tflite` embed.  [ ] Phase 6 — on-device KWS.
 - [ ] Phase 7 — pre-roll + WebSocket stream.  [ ] Phase 8 — faster-whisper
       server (laptop has GTX 2050 4 GB + i5/8 GB; use CUDA).
