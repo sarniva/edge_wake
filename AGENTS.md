@@ -148,6 +148,12 @@ per call (see lesson 3).
   Bengali word; GSC-English unknowns never taught otherwise. Fix = hard-
   negative mining with Bengali/Hindi speech, not thresholds (margin/thr
   can't stop 0.9+ confident misclassifications).
+  DECISION v2 (firmware, no retrain): 5-frame sliding average + current-frame
+  freshness (kills stale-vote fires like p=0.031) + noise-adaptive profile
+  (silence-floor EMA, noisy thr 0.78/margin 0.35) + skip inference after 2 s
+  silence (decays history). Research backing: ESPHome sliding-window+cutoff,
+  adaptive thresholds, GraphemeAug TTS confusables (Sarvam script in dataset
+  repo), interval-loss over focal.
   HARD-NEG SOURCES (dataset repo ext/, all CC-BY-4.0, transcripts mined for
   guru/jaguar-like words): Kathbath bn test (2.8k clips/20 spk, 19 guru +
   jaguar hits), OpenSLR asr_bengali shards _0+_1+_2 (41k clips, 98 local
