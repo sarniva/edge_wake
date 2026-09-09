@@ -133,6 +133,21 @@ per call (see lesson 3).
   repro == Kaggle), raw DET thr0.7 FRR 4.6%/FAR 1.4% (beats v8 6.1%/1.4%).
   14/15 fixed, 0 new (dud c02 persists). Branch model-v9, thr stays 0.7.
   Real verdict = Bengali YouTube 60 s re-test (SAME video as v8's 8 fires).
+- [~] Threshold experiments (user-driven, on model-v9 branch).
+  PRE-A BASELINE (revert target): KWS_QUIET_THR 0.7 / KWS_NOISY_THR 0.78 /
+  margins 0.30/0.35 / 2-of-3 vote / VAD gate 1.5 s / debounce 1.5 s.
+  Revert: `git revert 7d0eb7e 6051b6d` (option-A then option-B commits),
+  or hand-restore the two #defines, rebuild, flash.
+  - Option A (LIVE): quiet thr 0.80, noisy 0.88 (commit 7d0eb7e). Rationale:
+    user-observed wakes 0.85-0.95 vs FAs <0.85 on small sample - but full
+    logs show overlap (true 0.77 vs FA 0.945), so 0.85 was rejected as
+    recall suicide; 0.80 is the reversible middle. Margins/vote unchanged.
+  - Option B (NEXT): A + debounce 1.5 s -> 3.0 s (commit 6051b6d). Test
+    words must be spaced >=4 s apart. Cuts repeat-fires, not distinct ones.
+  - Option C (queued): revert to 0.7 + v10 data (probe survivors +
+    YouTube captures). Decides between stricter gate vs smarter model.
+  User order: A -> measure -> B -> measure -> C.
+- [ ] Phase 7 — pre-roll + WebSocket stream (KICKED OFF 2026-09-10).
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [x] Phase 6 (bring-up) — on-device KWS works: run-A int8 embedded via xxd,
       esp-tflite-micro 1.4.0 + ESP-NN + led_strip, 4 Hz full-window inference,
