@@ -477,17 +477,27 @@ static void stream_on_wake(int64_t now)
 {
     if (s_streaming || !streamer_ready()) return;
     if (!streamer_begin()) return;
-    // Pre-roll oldest-first in small frames (no 48 KB staging buffer).
+    // Pre-roll oldest-first in HOP-sized frames with pacing + retry.
+    // Lesson (2026-09-10): 12 back-to-back 4 KB frames burst the TCP
+    // send buffer (EAGAIN storm -> ws tears down). 960 B frames with a
+    // 5 ms breather match the live path, which already streamed 11.3 s
+    // cleanly. No big staging buffer needed.
     uint32_t avail = ring_write < RING_SAMPLES ? ring_write : RING_SAMPLES;
     uint32_t pre = avail < STREAM_PREROLL_SAMPLES ? avail : STREAM_PREROLL_SAMPLES;
     for (uint32_t off = 0; off < pre;) {
-        int chunk = pre - off < 2048 ? pre - off : 2048;
+        int chunk = pre - off < HOP_SAMPLES ? pre - off : HOP_SAMPLES;
         ring_slice(s_tx, ring_write - pre + off, chunk);
-        if (!streamer_send_pcm(s_tx, chunk)) {
+        bool sent = false;
+        for (int r = 0; r < 3 && !sent; r++) {
+            if (r > 0) vTaskDelay(pdMS_TO_TICKS(50));
+            sent = streamer_send_pcm(s_tx, chunk);
+        }
+        if (!sent) {
             streamer_end();
             return;  // KWS carries on; the laptop just misses one command
         }
         off += chunk;
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
     s_streaming = true;
     s_stream_start_us = now;
@@ -499,6 +509,10 @@ static void stream_on_wake(int64_t now)
 static bool stream_feed(const int16_t *pcm, int n, int64_t now)
 {
     bool ok = streamer_send_pcm(pcm, n);
+    if (!ok) {  // one retry: WiFi hiccups shouldn't kill an utterance
+        vTaskDelay(pdMS_TO_TICKS(20));
+        ok = streamer_send_pcm(pcm, n);
+    }
     if (ok && now - s_stream_start_us < STREAM_MAX_US &&
         (now - s_stream_start_us < STREAM_MIN_US ||
          now - s_last_speech_us < STREAM_SIL_STOP_US)) {
