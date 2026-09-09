@@ -184,15 +184,16 @@ static uint32_t ring_fill_pct(void)
     return (100 * f) / RING_SAMPLES;
 }
 
-// ---- KWS decision: smoothed posteriors + adaptive operating point ----
-// 1) Sliding average over the last 5 inferences (~1.25 s span at 4 Hz) for
-//    both wake posterior and margin. A fire needs the AVERAGE hot AND the
-//    CURRENT frame hot - this kills stale-vote fires (observed: WAKE at
-//    p=0.031 carried by two old hot votes) that binary 2/3 voting allows.
-// 2) Adaptive profile: slow EMA of hop RMS during SILENCE estimates the room
-//    floor. Fan-level floors tighten thr/margin a notch; quiet rooms stay at
-//    the DET-table values. Switches are logged.
-#define KWS_SMOOTH_N      5
+// ---- KWS decision: short-window votes + freshness + adaptive point ----
+// Live finding (2026-09): a true word burns hot for only ~2 inferences
+// (~0.5 s: w=0.99,0.99 then collapse to ~0.27). A 5-frame average dilutes
+// that to ~0.65 and strangles real detections, so the window is 3: fire
+// needs the CURRENT frame hot plus at least one more hot frame in the last
+// 3 (2-of-3 including current). The current-frame requirement kills
+// stale-vote fires (observed: WAKE at p=0.031 carried by old votes).
+// Bengali-confident fires (w~0.9,u~0.0, consecutive) are indistinguishable
+// here by construction - that needs retraining with confusables.
+#define KWS_WIN_N         3
 #define KWS_QUIET_THR     0.7f
 #define KWS_QUIET_MARGIN  0.3f
 #define KWS_NOISY_THR     0.78f
@@ -331,8 +332,8 @@ static float s_mel_win[FE_NFRAMES_1S][FE_NMELS];
 
 // KWS runtime state.
 static bool s_kws_ok = false;
-static float s_hist_w[KWS_SMOOTH_N];  // recent wake posteriors (avg fire)
-static float s_hist_m[KWS_SMOOTH_N];  // recent margins (avg fire)
+static float s_hist_w[KWS_WIN_N];  // recent wake posteriors (decision window)
+static float s_hist_m[KWS_WIN_N];  // recent margins (decision window)
 static int s_hist_idx = 0;
 static float s_floor = 1500.0f;  // slow EMA of SILENCE hop RMS (room floor)
 static bool s_noisy = false;     // room profile derived from s_floor
@@ -353,7 +354,7 @@ static void kws_idle_tick(void)
 {
     s_hist_w[s_hist_idx] = 0.0f;
     s_hist_m[s_hist_idx] = 0.0f;
-    s_hist_idx = (s_hist_idx + 1) % KWS_SMOOTH_N;
+    s_hist_idx = (s_hist_idx + 1) % KWS_WIN_N;
 }
 
 // One full KWS cycle: newest 1 s from ring -> 61 mel frames -> infer ->
@@ -378,14 +379,15 @@ static void kws_cycle(int64_t now)
     if (p < 0) return;  // invoke failed; error already logged
     s_hist_w[s_hist_idx] = p;
     s_hist_m[s_hist_idx] = margin;
-    s_hist_idx = (s_hist_idx + 1) % KWS_SMOOTH_N;
+    s_hist_idx = (s_hist_idx + 1) % KWS_WIN_N;
+    // Window average is display/diagnosis; the FIRE rule below is what decides.
     float avg_w = 0, avg_m = 0;
-    for (int i = 0; i < KWS_SMOOTH_N; i++) {
+    for (int i = 0; i < KWS_WIN_N; i++) {
         avg_w += s_hist_w[i];
         avg_m += s_hist_m[i];
     }
-    avg_w /= KWS_SMOOTH_N;
-    avg_m /= KWS_SMOOTH_N;
+    avg_w /= KWS_WIN_N;
+    avg_m /= KWS_WIN_N;
     float thr = kws_thr(), mthr = kws_margin();
     // Trace anything suspicious (max 4 lines/s): silence sits at ~0.01,
     // so anything here deserves a look. avg= shows the smoothed value that
@@ -402,10 +404,19 @@ static void kws_cycle(int64_t now)
                  (double)s_inv_us_sum / s_inf_count / 1000.0,
                  s_noisy ? "noisy" : "quiet", (double)s_floor);
     }
-    // Fire needs: hot average AND hot current frame (freshness kills stale
-    // votes) AND daylight vs runner-up on average. Debounce + VAD gate after.
-    bool hot = (avg_w >= thr) && (avg_m >= mthr) &&
-               (p >= thr) && (margin >= mthr * 0.5f);
+    // Fire needs: the CURRENT frame hot (freshness kills stale votes) plus
+    // at least one more hot frame in the 3-window (a true word burns ~2).
+    // A hot frame = thr + full margin; the current frame gets a relaxed
+    // margin (word edges are ambiguous) but must clear the threshold.
+    bool cur_hot = (p >= thr) && (margin >= mthr * 0.5f);
+    int hits = cur_hot ? 1 : 0;
+    for (int i = 0; i < KWS_WIN_N; i++) {
+        int idx = (s_hist_idx + KWS_WIN_N - 1 - i) % KWS_WIN_N;
+        if (i == 0) continue;  // slot just written = current frame, counted above
+        if (s_hist_w[idx] >= thr && s_hist_m[idx] >= mthr) hits++;
+        if (hits >= 2) break;
+    }
+    bool hot = cur_hot && (hits >= 2);
     if (!hot || now - s_last_wake_us <= KWS_DEBOUNCE_US) {
         if (s_wake_until_us && now > s_wake_until_us) {
             s_wake_until_us = 0;
