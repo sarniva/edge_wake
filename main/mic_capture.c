@@ -202,7 +202,10 @@ static uint32_t ring_fill_pct(void)
 #define KWS_NOISY_THR     0.88f
 #define KWS_NOISY_MARGIN  0.35f
 #define KWS_NOISY_FLOOR   4000.0f  // silence-floor RMS above this = noisy room
-#define KWS_DEBOUNCE_US   1500000
+// Option-B experiment (2026-09-09): debounce 1.5 s -> 3.0 s to cut
+// repeat-fires on one sentence/Youtube event. NOTE: test words must be
+// spaced >=4 s apart or the cooldown eats them. Revert = 1500000.
+#define KWS_DEBOUNCE_US   3000000
 #define KWS_PERIOD_US     250000   // 4 inferences/s
 #define KWS_VAD_FRESH_US  1500000  // WAKE needs speech within last 1.5 s
 #define KWS_IDLE_SKIP_US  2000000  // no speech this long -> skip inference
