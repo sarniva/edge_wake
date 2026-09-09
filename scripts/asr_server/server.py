@@ -94,16 +94,45 @@ def transcribe(model, raw, sr):
                             vad_parameters={"min_silence_duration_ms": 500})
 
 
+def resolve_device(want, model_name):
+    """Pick (device, compute_type), preferring CUDA but surviving without it.
+
+    CUDA-12-linked ctranslate2 on a CUDA-13 system fails at load with
+    'libcublas.so.12 not found'. Rather than dying, fall back to CPU so
+    the demo works (slower) while the user fixes the libs.
+    """
+    if want in ("auto", "cuda"):
+        try:
+            probe = WhisperModel("tiny", device="cuda", compute_type="int8")
+            del probe
+            print("device: cuda (int8)", flush=True)
+            return "cuda", "int8"
+        except Exception as e:
+            print(f"device: CUDA unusable ({type(e).__name__}: {e})", flush=True)
+            if want == "cuda":
+                print("hint: pip install -U ctranslate2 faster-whisper, or "
+                      "pip install nvidia-cublas-cu12 (+ LD_LIBRARY_PATH), "
+                      "or match system CUDA to the wheel", flush=True)
+                raise SystemExit(1)
+            print("device: falling back to CPU (slower, still works)", flush=True)
+    print("device: cpu (int8)", flush=True)
+    return "cpu", "int8"
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--model", default="large-v3-turbo")
     ap.add_argument("--outdir", default="utterances")
+    ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"],
+                    help="auto = try CUDA, fall back to CPU (slower) if the "
+                         "CUDA libs don't load (e.g. cuBLAS .so.12 vs .so.13)")
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
     print(f"loading {a.model} (first run downloads ~800 MB)...", flush=True)
-    model = WhisperModel(a.model, device="cuda", compute_type="int8")
+    dev, ctype = resolve_device(a.device, a.model)
+    model = WhisperModel(a.model, device=dev, compute_type=ctype)
     logf = open(os.path.join(a.outdir, "results.log"), "a")
     print(f"serving on {a.host}:{a.port} (int8, cuda, vad_filter)", flush=True)
     async with websockets.serve(
