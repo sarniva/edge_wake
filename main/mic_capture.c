@@ -464,8 +464,8 @@ static void kws_cycle(int64_t now)
 // ---- Phase-7 uplink: pre-roll + live stream after each WAKE ----
 // Sends the 1.5 s BEFORE the wake word (already in the ring) plus live
 // audio for as long as the speaker keeps speaking. Stop rule is SILENCE
-// alone (2 s without voice); there is deliberately NO time cap (user
-// decision 2026-09-10: "stream as long as the speaker is speaking").
+// alone (2 s without voice); a 25 s safety cap bounds the worst case
+// (user decision 2026-09-10: 25 s, was uncapped briefly).
 // Tradeoff, stated plainly: while uploading, KWS is paused, so nonstop
 // room noise (TV all evening) holds the stream open and the chip stays
 // deaf to new wake words until 2 s of quiet. If that ever wedges real
@@ -473,6 +473,10 @@ static void kws_cycle(int64_t now)
 #define STREAM_PREROLL_SAMPLES 24000
 #define STREAM_SIL_STOP_US     2000000
 #define STREAM_MIN_US          1000000
+// Safety cap (user decision 2026-09-10): 25 s per utterance even if the
+// room never goes quiet. Bounds the worst case (TV wedging the chip deaf
+// while KWS is paused); normal speech ends via the 2 s silence rule first.
+#define STREAM_MAX_US          25000000
 static bool s_streaming = false;
 static int64_t s_stream_start_us = 0;
 static int16_t s_tx[2048];  // ws frame scratch (4 KB internal)
@@ -510,7 +514,8 @@ static void stream_on_wake(int64_t now)
 }
 
 // Per-hop while streaming. Returns true while the stream continues:
-// minimum 1 s, then for as long as voice was heard within the last 2 s.
+// minimum 1 s, then while voice was heard within the last 2 s, with a
+// 25 s safety cap even if the room never goes quiet.
 static bool stream_feed(const int16_t *pcm, int n, int64_t now)
 {
     bool ok = streamer_send_pcm(pcm, n);
@@ -518,8 +523,9 @@ static bool stream_feed(const int16_t *pcm, int n, int64_t now)
         vTaskDelay(pdMS_TO_TICKS(20));
         ok = streamer_send_pcm(pcm, n);
     }
-    if (ok && (now - s_stream_start_us < STREAM_MIN_US ||
-               now - s_last_speech_us < STREAM_SIL_STOP_US)) {
+    if (ok && now - s_stream_start_us < STREAM_MAX_US &&
+        (now - s_stream_start_us < STREAM_MIN_US ||
+         now - s_last_speech_us < STREAM_SIL_STOP_US)) {
         return true;
     }
     if (!ok) ESP_LOGW(TAG, "stream: send failed, aborting");
