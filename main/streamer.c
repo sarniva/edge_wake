@@ -135,8 +135,10 @@ bool streamer_begin(void)
 {
     if (!streamer_ready()) return false;
     const char *msg = "{\"type\":\"start\",\"sr\":16000,\"ch\":1}";
-    int n = esp_websocket_client_send_text(s_ws, msg, strlen(msg),
-                                           pdMS_TO_TICKS(1000));
+    // NOTE: the send_* timeout args are MILLISECONDS (not ticks). An early
+    // rev passed pdMS_TO_TICKS(100)=10 ticks as "10 ms" and every send on a
+    // momentarily-busy socket died instantly (2026-09-10 EAGAIN storm).
+    int n = esp_websocket_client_send_text(s_ws, msg, strlen(msg), 2000);
     if (n < 0) { ESP_LOGW(TAG, "start send failed"); return false; }
     ESP_LOGI(TAG, "stream >>> start");
     return true;
@@ -146,8 +148,7 @@ bool streamer_send_pcm(const int16_t *pcm, size_t n_samples)
 {
     if (!streamer_ready()) return false;
     int n = esp_websocket_client_send_bin(s_ws, (const char *)pcm,
-                                          n_samples * sizeof(int16_t),
-                                          pdMS_TO_TICKS(100));
+                                          n_samples * sizeof(int16_t), 500);
     return n >= 0;
 }
 
@@ -155,8 +156,7 @@ void streamer_end(void)
 {
     if (s_ws && s_ws_up) {
         const char *msg = "{\"type\":\"end\"}";
-        esp_websocket_client_send_text(s_ws, msg, strlen(msg),
-                                       pdMS_TO_TICKS(1000));
+        esp_websocket_client_send_text(s_ws, msg, strlen(msg), 2000);
     }
     ESP_LOGI(TAG, "stream >>> end");
 }
