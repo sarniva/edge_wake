@@ -463,11 +463,15 @@ static void kws_cycle(int64_t now)
 
 // ---- Phase-7 uplink: pre-roll + live stream after each WAKE ----
 // Sends the 1.5 s BEFORE the wake word (already in the ring) plus live
-// audio until 2 s of silence or 10 s max, then the laptop transcribes.
-// KWS inference pauses while uploading (CPU + log clarity).
+// audio for as long as the speaker keeps speaking. Stop rule is SILENCE
+// alone (2 s without voice); there is deliberately NO time cap (user
+// decision 2026-09-10: "stream as long as the speaker is speaking").
+// Tradeoff, stated plainly: while uploading, KWS is paused, so nonstop
+// room noise (TV all evening) holds the stream open and the chip stays
+// deaf to new wake words until 2 s of quiet. If that ever wedges real
+// use, re-introduce STREAM_MAX_US below.
 #define STREAM_PREROLL_SAMPLES 24000
 #define STREAM_SIL_STOP_US     2000000
-#define STREAM_MAX_US          10000000
 #define STREAM_MIN_US          1000000
 static bool s_streaming = false;
 static int64_t s_stream_start_us = 0;
@@ -505,7 +509,8 @@ static void stream_on_wake(int64_t now)
     ESP_LOGI(TAG, "stream: pre-roll %.1fs sent, live...", (double)pre / 16000.0);
 }
 
-// Per-hop while streaming. Returns true while the stream continues.
+// Per-hop while streaming. Returns true while the stream continues:
+// minimum 1 s, then for as long as voice was heard within the last 2 s.
 static bool stream_feed(const int16_t *pcm, int n, int64_t now)
 {
     bool ok = streamer_send_pcm(pcm, n);
@@ -513,9 +518,8 @@ static bool stream_feed(const int16_t *pcm, int n, int64_t now)
         vTaskDelay(pdMS_TO_TICKS(20));
         ok = streamer_send_pcm(pcm, n);
     }
-    if (ok && now - s_stream_start_us < STREAM_MAX_US &&
-        (now - s_stream_start_us < STREAM_MIN_US ||
-         now - s_last_speech_us < STREAM_SIL_STOP_US)) {
+    if (ok && (now - s_stream_start_us < STREAM_MIN_US ||
+               now - s_last_speech_us < STREAM_SIL_STOP_US)) {
         return true;
     }
     if (!ok) ESP_LOGW(TAG, "stream: send failed, aborting");
