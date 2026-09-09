@@ -1,0 +1,8 @@
+# edge_wake partition table (16 MB flash, plenty of room).
+# Factory grew 1 MB -> 2 MB in Phase 7: WiFi/LWIP/mbedTLS/websocket
+# code added ~300 KB and overflowed the old 1 MB slot.
+# nvs,phy_init offsets kept identical to the default table.
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 0x200000,

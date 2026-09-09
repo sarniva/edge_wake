@@ -62,6 +62,7 @@
 #include "led_strip.h"
 #include "frontend.h"
 #include "kws.h"
+#include "streamer.h"
 
 static const char *TAG = "mic_test";
 
@@ -167,6 +168,16 @@ static void ring_push(const int16_t *in, int n)
         memcpy(ring_buf, in + first, (n - first) * sizeof(int16_t));
     }
     ring_write += n;
+}
+
+// Copy n samples starting at absolute position start (oldest-first) into
+// out. For the uplink pre-roll: walks the ring without a big staging
+// buffer (48 KB would not fit internal RAM - see streamer note).
+static void ring_slice(int16_t *out, uint32_t start, int n)
+{
+    for (int i = 0; i < n; i++) {
+        out[i] = ring_buf[(start + i) % RING_SAMPLES];
+    }
 }
 
 // Copy the newest n samples (n <= RING_SAMPLES) into out, oldest-first.
@@ -331,10 +342,13 @@ static inline float fe_prev_of(int f)
 // Forward declarations (defined further below).
 static void fe_dump_1s(const char *why);
 static void fe_pow_dump(const char *why);
+static void stream_on_wake(int64_t now);
 
-// Shared 61x40 inference window (file-static, NOT stack: ~10 KB).
-// fe_dump_1s and the KWS loop both use it, never concurrently.
-static float s_mel_win[FE_NFRAMES_1S][FE_NMELS];
+// Shared 61x40 inference window (~10 KB). Lives in PSRAM since Phase 7:
+// WiFi static buffers need the internal RAM, and this window is touched
+// 4x/s sequentially (cache-friendly) plus dumps - never concurrently,
+// never by DMA. Allocated early in app_main with the other big blocks.
+static float (*s_mel_win)[FE_NMELS] = NULL;
 
 // KWS runtime state.
 static bool s_kws_ok = false;
@@ -444,6 +458,59 @@ static void kws_cycle(int64_t now)
     ESP_LOGI(TAG, "WAKE w=%.3f avg=%.3f m=%.2f t=%.2fs",
              (double)p, (double)avg_w, (double)avg_m,
              (double)now / 1000000.0);
+    stream_on_wake(now);
+}
+
+// ---- Phase-7 uplink: pre-roll + live stream after each WAKE ----
+// Sends the 1.5 s BEFORE the wake word (already in the ring) plus live
+// audio until 2 s of silence or 10 s max, then the laptop transcribes.
+// KWS inference pauses while uploading (CPU + log clarity).
+#define STREAM_PREROLL_SAMPLES 24000
+#define STREAM_SIL_STOP_US     2000000
+#define STREAM_MAX_US          10000000
+#define STREAM_MIN_US          1000000
+static bool s_streaming = false;
+static int64_t s_stream_start_us = 0;
+static int16_t s_tx[2048];  // ws frame scratch (4 KB internal)
+
+static void stream_on_wake(int64_t now)
+{
+    if (s_streaming || !streamer_ready()) return;
+    if (!streamer_begin()) return;
+    // Pre-roll oldest-first in small frames (no 48 KB staging buffer).
+    uint32_t avail = ring_write < RING_SAMPLES ? ring_write : RING_SAMPLES;
+    uint32_t pre = avail < STREAM_PREROLL_SAMPLES ? avail : STREAM_PREROLL_SAMPLES;
+    for (uint32_t off = 0; off < pre;) {
+        int chunk = pre - off < 2048 ? pre - off : 2048;
+        ring_slice(s_tx, ring_write - pre + off, chunk);
+        if (!streamer_send_pcm(s_tx, chunk)) {
+            streamer_end();
+            return;  // KWS carries on; the laptop just misses one command
+        }
+        off += chunk;
+    }
+    s_streaming = true;
+    s_stream_start_us = now;
+    led_set(0, 0, 64);  // blue = uploading to laptop
+    ESP_LOGI(TAG, "stream: pre-roll %.1fs sent, live...", (double)pre / 16000.0);
+}
+
+// Per-hop while streaming. Returns true while the stream continues.
+static bool stream_feed(const int16_t *pcm, int n, int64_t now)
+{
+    bool ok = streamer_send_pcm(pcm, n);
+    if (ok && now - s_stream_start_us < STREAM_MAX_US &&
+        (now - s_stream_start_us < STREAM_MIN_US ||
+         now - s_last_speech_us < STREAM_SIL_STOP_US)) {
+        return true;
+    }
+    if (!ok) ESP_LOGW(TAG, "stream: send failed, aborting");
+    streamer_end();
+    s_streaming = false;
+    led_set(0, 16, 0);
+    ESP_LOGI(TAG, "stream: done (%.1fs)",
+             (double)(now - s_stream_start_us) / 1000000.0);
+    return false;
 }
 
 static void poll_serial_cmd(void)
@@ -617,6 +684,9 @@ void app_main(void)
     fe_pcm = heap_caps_malloc(FE_SR * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!fe_pcm) fe_pcm = malloc(FE_SR * sizeof(int16_t));
     if (!fe_pcm) { ESP_LOGE(TAG, "cannot allocate fe buffer"); return; }
+    // 61x40 mel window: PSRAM (see decl note - WiFi owns internal now).
+    s_mel_win = heap_caps_malloc(FE_NFRAMES_1S * sizeof(*s_mel_win), MALLOC_CAP_SPIRAM);
+    if (!s_mel_win) { ESP_LOGE(TAG, "cannot allocate mel window (PSRAM?)"); return; }
     ESP_LOGI(TAG, "ring %u KB + fe 32 KB internal, largest free now %u",
              (unsigned)(RING_SAMPLES * 2 / 1024),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
@@ -626,6 +696,9 @@ void app_main(void)
     led_init();
     s_kws_ok = kws_init();
     ESP_LOGI(TAG, "kws %s", s_kws_ok ? "ARMED (3win thr 0.80/0.88 adaptive, 4 Hz)" : "OFF (init failed)");
+    bool uplink = streamer_init();
+    ESP_LOGI(TAG, "uplink %s", uplink ? "READY (pre-roll + live to laptop)"
+                                      : "OFFLINE (KWS-only; wifi retries in bg)");
 
     int btn_prev = 1;
     int64_t t_boot = esp_timer_get_time();
@@ -638,10 +711,11 @@ void app_main(void)
         poll_serial_cmd();
         int64_t now = esp_timer_get_time();
         // KWS at 4 Hz (full-window recompute for bring-up; incremental later).
+        // Paused while uploading a command (stream owns the mic + CPU then).
         // Long silence skips DSP+invoke (~170 ms saved per skipped cycle) and
         // decays the smoothing history so nothing stale survives into the
         // next utterance. First 30 s after boot always run (proves pipeline).
-        if (s_kws_ok && now - s_last_inf_us >= KWS_PERIOD_US &&
+        if (s_kws_ok && !s_streaming && now - s_last_inf_us >= KWS_PERIOD_US &&
             ring_write >= (uint32_t)FE_SR) {
             s_last_inf_us = now;
             if (now - t_boot > 30000000 &&
@@ -680,9 +754,15 @@ void app_main(void)
             if (noisy != s_noisy) {
                 s_noisy = noisy;
                 ESP_LOGI(TAG, "room profile -> %s (silence floor %.0f)",
-                         noisy ? "NOISY thr=0.78" : "quiet thr=0.70",
+                         noisy ? "NOISY thr=0.88" : "quiet thr=0.80",
                          (double)s_floor);
             }
+        }
+        // Phase-7: while uploading, every hop goes to the laptop (stop on
+        // 2 s silence / 10 s max inside stream_feed).
+        if (s_streaming) {
+            stream_feed(s_hop, got, now);
+            now = esp_timer_get_time();
         }
 
         now = esp_timer_get_time();

@@ -1,8 +1,24 @@
 # Default target
 CONFIG_IDF_TARGET="esp32s3"
 # Our board: 16MB quad flash (detected via esptool flash_id) + 8MB octal PSRAM
-# (present on the module, but this firmware no longer uses PSRAM at all)
+# (module N16R8). KWS hot path stays internal; Phase-7 WiFi/network
+# buffers spill to PSRAM (internal largest-free is ~31 KB - WiFi init
+# would otherwise starve). Lesson 1 applies: rm sdkconfig + set-target
+# after touching this file.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SIZE_8MB=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Phase-7 RAM diet (dram0 overflowed by ~1 KB with WiFi on): our uplink is
+# 32 KB/s, so 6 static RX buffers + 4 sockets are plenty (defaults 10/10
+# serve routers, not our trickle). Saves ~8 KB internal .bss.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_LWIP_MAX_SOCKETS=4
+# Phase-7 app outgrew the default 1 MB factory slot (WiFi/LWIP/TLS/ws
+# code); 16 MB flash, so factory takes 2 MB via partitions.csv.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # Fast console so mel/power hex dumps finish quickly
 CONFIG_ESP_CONSOLE_UART_CUSTOM=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600

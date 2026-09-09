@@ -17,3 +17,4 @@ dependencies:
   espressif/esp-dsp: ^1.7.1
   espressif/esp-tflite-micro: '*'
   espressif/led_strip: '*'
+  espressif/esp_websocket_client: '*'
