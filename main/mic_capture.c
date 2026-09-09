@@ -3,7 +3,9 @@
  * INMP441 -> ESP32-S3 I2S -> 16 kHz mono PCM -> circular ring buffer
  * -> per-hop energy VAD + live VU + on-device log-mel (esp-dsp FFT)
  * -> run-A int8 DS-CNN-S (esp-tflite-micro + ESP-NN) at 4 Hz
- * -> 2-of-3 voting + 1.5 s debounce -> RGB LED + WAKE log.
+ * -> 5-frame average + current-frame freshness + margin, adaptive
+ *    quiet/noisy operating point, 1.5 s debounce -> RGB LED + WAKE log.
+ *    Inference skipped (history decayed) after 2 s of silence.
  *
  * Wiring (INMP441 breakout -> ESP32-S3 DevKit):
  *   VDD -> 3V3        (NEVER 5V)
@@ -182,17 +184,24 @@ static uint32_t ring_fill_pct(void)
     return (100 * f) / RING_SAMPLES;
 }
 
-// ---- KWS decision (thr + margin + 2-of-3 voting + debounce + VAD gate) ----
-// Margin rule: non-wake speech often scores p_wake moderately BUT also
-// scores p_unknown highly; true wake stands alone. Requiring a margin kills
-// most speech false-fires that an absolute threshold lets through.
-#define KWS_THRESHOLD     0.7f
-#define KWS_MARGIN        0.3f   // p_wake - max(p_sil, p_unk) must exceed this
-#define KWS_VOTES         3
-#define KWS_MIN_HITS      2
+// ---- KWS decision: smoothed posteriors + adaptive operating point ----
+// 1) Sliding average over the last 5 inferences (~1.25 s span at 4 Hz) for
+//    both wake posterior and margin. A fire needs the AVERAGE hot AND the
+//    CURRENT frame hot - this kills stale-vote fires (observed: WAKE at
+//    p=0.031 carried by two old hot votes) that binary 2/3 voting allows.
+// 2) Adaptive profile: slow EMA of hop RMS during SILENCE estimates the room
+//    floor. Fan-level floors tighten thr/margin a notch; quiet rooms stay at
+//    the DET-table values. Switches are logged.
+#define KWS_SMOOTH_N      5
+#define KWS_QUIET_THR     0.7f
+#define KWS_QUIET_MARGIN  0.3f
+#define KWS_NOISY_THR     0.78f
+#define KWS_NOISY_MARGIN  0.35f
+#define KWS_NOISY_FLOOR   4000.0f  // silence-floor RMS above this = noisy room
 #define KWS_DEBOUNCE_US   1500000
 #define KWS_PERIOD_US     250000   // 4 inferences/s
 #define KWS_VAD_FRESH_US  1500000  // WAKE needs speech within last 1.5 s
+#define KWS_IDLE_SKIP_US  2000000  // no speech this long -> skip inference
 #define KWS_TRACE_P       0.25f    // log any posterior above this (visibility)
 
 #define LED_GPIO          48       // DevKitC-1 addressable RGB LED
@@ -322,14 +331,30 @@ static float s_mel_win[FE_NFRAMES_1S][FE_NMELS];
 
 // KWS runtime state.
 static bool s_kws_ok = false;
-static float s_votes[KWS_VOTES];
-static int s_vote_idx = 0;
+static float s_hist_w[KWS_SMOOTH_N];  // recent wake posteriors (avg fire)
+static float s_hist_m[KWS_SMOOTH_N];  // recent margins (avg fire)
+static int s_hist_idx = 0;
+static float s_floor = 1500.0f;  // slow EMA of SILENCE hop RMS (room floor)
+static bool s_noisy = false;     // room profile derived from s_floor
 static int64_t s_last_wake_us = 0;
 static int64_t s_last_inf_us = 0;
 static int64_t s_last_speech_us = 0;  // freshest hop with VAD==SPEECH
 static int s_inf_count = 0;
 static uint64_t s_fe_us_sum = 0, s_inv_us_sum = 0;
 static int64_t s_wake_until_us = 0;
+
+static inline float kws_thr(void) { return s_noisy ? KWS_NOISY_THR : KWS_QUIET_THR; }
+static inline float kws_margin(void) { return s_noisy ? KWS_NOISY_MARGIN : KWS_QUIET_MARGIN; }
+
+// Long-silence bookkeeping: decay the smoothing history without spending
+// DSP+invoke cycles. Keeps cadence and prevents stale hot votes surviving
+// into the next utterance minutes later.
+static void kws_idle_tick(void)
+{
+    s_hist_w[s_hist_idx] = 0.0f;
+    s_hist_m[s_hist_idx] = 0.0f;
+    s_hist_idx = (s_hist_idx + 1) % KWS_SMOOTH_N;
+}
 
 // One full KWS cycle: newest 1 s from ring -> 61 mel frames -> infer ->
 // vote -> WAKE action. Called at 4 Hz from the main loop.
@@ -346,33 +371,42 @@ static void kws_cycle(int64_t now)
     float p = kws_infer(s_mel_win, probs, &inv_us);
     float p_unk = probs[1] > probs[0] ? probs[1] : probs[0];
     float margin = p - p_unk;
-    // A vote needs BOTH absolute confidence and daylight vs runner-up.
-    float vote = (p >= KWS_THRESHOLD && margin >= KWS_MARGIN) ? 1.0f : 0.0f;
     s_fe_us_sum += (uint64_t)(t1 - t0);
     s_inv_us_sum += (uint64_t)(inv_us > 0 ? inv_us : 0);
     s_inf_count++;
 
     if (p < 0) return;  // invoke failed; error already logged
-    s_votes[s_vote_idx] = vote;
-    s_vote_idx = (s_vote_idx + 1) % KWS_VOTES;
-    int hits = 0;
-    for (int i = 0; i < KWS_VOTES; i++) {
-        if (s_votes[i] >= 0.5f) hits++;
+    s_hist_w[s_hist_idx] = p;
+    s_hist_m[s_hist_idx] = margin;
+    s_hist_idx = (s_hist_idx + 1) % KWS_SMOOTH_N;
+    float avg_w = 0, avg_m = 0;
+    for (int i = 0; i < KWS_SMOOTH_N; i++) {
+        avg_w += s_hist_w[i];
+        avg_m += s_hist_m[i];
     }
+    avg_w /= KWS_SMOOTH_N;
+    avg_m /= KWS_SMOOTH_N;
+    float thr = kws_thr(), mthr = kws_margin();
     // Trace anything suspicious (max 4 lines/s): silence sits at ~0.01,
-    // so anything here deserves a look. Full vector shows WHY it fired.
+    // so anything here deserves a look. avg= shows the smoothed value that
+    // actually decides, alongside the raw frame.
     if (p >= KWS_TRACE_P) {
-        ESP_LOGI(TAG, "kws? w=%.3f u=%.3f s=%.3f t=%.2fs", (double)p,
-                 (double)probs[1], (double)probs[0],
+        ESP_LOGI(TAG, "kws? w=%.3f u=%.3f s=%.3f avg=%.3f t=%.2fs", (double)p,
+                 (double)probs[1], (double)probs[0], (double)avg_w,
                  (double)now / 1000000.0);
     }
     if (s_inf_count % 40 == 0) {
-        ESP_LOGI(TAG, "kws #%d: p=%.3f fe=%.1fms inv=%.1fms (avg)",
+        ESP_LOGI(TAG, "kws #%d: p=%.3f fe=%.1fms inv=%.1fms (avg) prof=%s floor=%.0f",
                  s_inf_count, (double)p,
                  (double)s_fe_us_sum / s_inf_count / 1000.0,
-                 (double)s_inv_us_sum / s_inf_count / 1000.0);
+                 (double)s_inv_us_sum / s_inf_count / 1000.0,
+                 s_noisy ? "noisy" : "quiet", (double)s_floor);
     }
-    if (hits < KWS_MIN_HITS || now - s_last_wake_us <= KWS_DEBOUNCE_US) {
+    // Fire needs: hot average AND hot current frame (freshness kills stale
+    // votes) AND daylight vs runner-up on average. Debounce + VAD gate after.
+    bool hot = (avg_w >= thr) && (avg_m >= mthr) &&
+               (p >= thr) && (margin >= mthr * 0.5f);
+    if (!hot || now - s_last_wake_us <= KWS_DEBOUNCE_US) {
         if (s_wake_until_us && now > s_wake_until_us) {
             s_wake_until_us = 0;
             led_set(0, 16, 0);
@@ -390,8 +424,9 @@ static void kws_cycle(int64_t now)
     s_last_wake_us = now;
     s_wake_until_us = now + 600000;
     led_set(64, 0, 0);
-    ESP_LOGI(TAG, "WAKE p=%.3f votes=%d/3 t=%.2fs",
-             (double)p, hits, (double)now / 1000000.0);
+    ESP_LOGI(TAG, "WAKE w=%.3f avg=%.3f m=%.2f t=%.2fs",
+             (double)p, (double)avg_w, (double)avg_m,
+             (double)now / 1000000.0);
 }
 
 static void poll_serial_cmd(void)
@@ -573,7 +608,7 @@ void app_main(void)
     fe_init();
     led_init();
     s_kws_ok = kws_init();
-    ESP_LOGI(TAG, "kws %s", s_kws_ok ? "ARMED (thr 0.7 + margin 0.3, 2/3 vote, 4 Hz)" : "OFF (init failed)");
+    ESP_LOGI(TAG, "kws %s", s_kws_ok ? "ARMED (avg5 thr 0.70/0.78 adaptive, 4 Hz)" : "OFF (init failed)");
 
     int btn_prev = 1;
     int64_t t_boot = esp_timer_get_time();
@@ -586,10 +621,18 @@ void app_main(void)
         poll_serial_cmd();
         int64_t now = esp_timer_get_time();
         // KWS at 4 Hz (full-window recompute for bring-up; incremental later).
+        // Long silence skips DSP+invoke (~170 ms saved per skipped cycle) and
+        // decays the smoothing history so nothing stale survives into the
+        // next utterance. First 30 s after boot always run (proves pipeline).
         if (s_kws_ok && now - s_last_inf_us >= KWS_PERIOD_US &&
             ring_write >= (uint32_t)FE_SR) {
             s_last_inf_us = now;
-            kws_cycle(now);
+            if (now - t_boot > 30000000 &&
+                now - s_last_speech_us > KWS_IDLE_SKIP_US) {
+                kws_idle_tick();
+            } else {
+                kws_cycle(now);
+            }
             now = esp_timer_get_time();
         }
         int got = read_mono_block(s_hop, HOP_SAMPLES);
@@ -612,6 +655,17 @@ void app_main(void)
         // just on transitions, so long utterances don't go stale).
         if (vad_state == VAD_SPEECH) {
             s_last_speech_us = now;
+        } else {
+            // Room-floor estimate: slow EMA of SILENCE hop RMS only (speech
+            // must not pollute it). ~15 s time constant at 33 hops/s.
+            s_floor += 0.002f * ((float)rms - s_floor);
+            bool noisy = s_floor > KWS_NOISY_FLOOR;
+            if (noisy != s_noisy) {
+                s_noisy = noisy;
+                ESP_LOGI(TAG, "room profile -> %s (silence floor %.0f)",
+                         noisy ? "NOISY thr=0.78" : "quiet thr=0.70",
+                         (double)s_floor);
+            }
         }
 
         now = esp_timer_get_time();
