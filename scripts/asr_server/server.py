@@ -54,8 +54,20 @@ async def handle(ws, model, outdir, logf):
                     dur = len(pcm) / 2 / sr
                     print(f"[end] {dur:.1f}s audio, transcribing...", flush=True)
                     loop = asyncio.get_running_loop()
-                    segs, info = await loop.run_in_executor(
-                        None, transcribe, model, bytes(pcm), sr)
+                    try:
+                        segs, info = await loop.run_in_executor(
+                            None, transcribe, model, bytes(pcm), sr)
+                    except Exception as e:
+                        # Never kill the connection on a bad utterance (e.g.
+                        # missing CUDA libs): report and keep serving. The
+                        # classic cause: libcublas.so not on the loader path.
+                        # Fix: export LD_LIBRARY_PATH=/opt/cuda/lib64 (Arch).
+                        err = f"{type(e).__name__}: {e}"
+                        print(f"[transcribe FAILED] {err}", flush=True)
+                        await ws.send(json.dumps({"type": "error",
+                                                  "message": err}))
+                        pcm = bytearray()
+                        continue
                     text = " ".join(s.text.strip() for s in segs).strip()
                     print(f"[text:{info.language} p={info.language_probability:.2f}] {text}",
                           flush=True)
