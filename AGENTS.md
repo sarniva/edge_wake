@@ -127,6 +127,12 @@ per call (see lesson 3).
   git (revert: `git checkout -- main/model_data.cc`, rebuild, flash).
   NEXT: Path B (fresh-head + pt60 stem + focal + folded-cw) on Kaggle; if it
   wins DET *and* device, it takes the slot.
+- [x] Phase 9 (v9 probe-verified) — 34 clips that FIRED v8 on a room speaker
+  (phonetic-mined real words: joto-goru 0.949, coca-cola 0.934...) retrained
+  as hard negatives (edgewake-v3/negpool-v3). SHIP PASS: int8 0.9569 (local
+  repro == Kaggle), raw DET thr0.7 FRR 4.6%/FAR 1.4% (beats v8 6.1%/1.4%).
+  14/15 fixed, 0 new (dud c02 persists). Branch model-v9, thr stays 0.7.
+  Real verdict = Bengali YouTube 60 s re-test (SAME video as v8's 8 fires).
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [x] Phase 6 (bring-up) — on-device KWS works: run-A int8 embedded via xxd,
       esp-tflite-micro 1.4.0 + ESP-NN + led_strip, 4 Hz full-window inference,
