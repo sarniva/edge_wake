@@ -103,6 +103,30 @@ per call (see lesson 3).
   master (2cc2416), v4 commit preserved on branch model-v4 (note: no space,
   git-unfriendly otherwise). Run-A firmware reflashed + verified alive.
   v5 prompt saved at dataset repo V5_PROMPT.md (paste into fresh session).
+  UPDATE v5/v6f/v7 (other agent, Kaggle): all fail to beat run-A on the real
+  job. v5 DET worse both axes. v7 (focal path) breaks calibration
+  (FRR 60%@thr0.7) and adds 6 NEW misses on previously-good clips - REJECT.
+  v6f closest: int8 acc 0.9124 (best overall), wake recall 89.4% (fixes 2 of
+  run-A's 15 misses, breaks 1), DET raw thr0.5 FRR 12.1%/FAR 3.6%; with T=0.5
+  scaling: thr0.5 FRR 10.6%/FAR 5.6%, thr0.7 14.4%/2.5% - roughly tied with
+  run-A, no clear win. All three plateau at FRR ~10-16%: the single-speaker
+  sp09 test set (with systematically QUIET misses) is the ceiling, not the
+  recipes. Tripwire machinery (FIXED/PERSISTENT/NEW) worked as designed.
+  DECISION: run-A stays canonical on-device. Tie-break only via live
+  Bengali FA/hr A/B (offered, not yet run). Next modeling lever if needed:
+  gain augmentation (original v5 plan, never actually executed).
+  UPDATE v6f-pt30 ON-DEVICE (mlab): user-tested BETTER than run-A on all 3 —
+  fan-only 60 s -> 0 FA (run-A: 1); 5x Jago Guru @1m -> 5/5, no extras noted
+  (run-A: 5/5 + 2 extra fires); Bengali YouTube @1m -> 3 fires/55 s (run-A:
+  ~7). Verdict: hard-negative mining (1500 Bengali/Hindi windows) cuts the
+  Bengali-FA rate by >half with no wake regression, despite the DET tripwire
+  (0 fixed + 1 NEW `02_c09` on sp09). Lesson reinforced: single-speaker DET
+  is noisy (±2 pts retrain swing); on-device FA/hr + wake recall is the real
+  metric. v6f-pt30 (warm-start run-A + focal, old stem, 51824 B) now flashed
+  for continued testing; run-A bytes kept at /tmp/model_data_runa.cc +
+  git (revert: `git checkout -- main/model_data.cc`, rebuild, flash).
+  NEXT: Path B (fresh-head + pt60 stem + focal + folded-cw) on Kaggle; if it
+  wins DET *and* device, it takes the slot.
 - [ ] Phase 4 — train DS-CNN (transfer-learn ML-zoo, DET/FA-hr eval).
 - [x] Phase 6 (bring-up) — on-device KWS works: run-A int8 embedded via xxd,
       esp-tflite-micro 1.4.0 + ESP-NN + led_strip, 4 Hz full-window inference,
