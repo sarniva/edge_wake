@@ -154,6 +154,10 @@ per call (see lesson 3).
   silence (decays history). Research backing: ESPHome sliding-window+cutoff,
   adaptive thresholds, GraphemeAug TTS confusables (Sarvam script in dataset
   repo), interval-loss over focal.
+  DECISION v2b (recall fix): 5-avg strangled true words (hot burst is only
+  ~2 inferences: 0.99,0.99 then collapse; avg peaked 0.65 <0.7 gate). Now
+  3-window 2-hot including current + relaxed current margin. Bengali-
+  confident fires pass by design here - only retraining fixes those.
   HARD-NEG SOURCES (dataset repo ext/, all CC-BY-4.0, transcripts mined for
   guru/jaguar-like words): Kathbath bn test (2.8k clips/20 spk, 19 guru +
   jaguar hits), OpenSLR asr_bengali shards _0+_1+_2 (41k clips, 98 local
