@@ -194,9 +194,12 @@ static uint32_t ring_fill_pct(void)
 // Bengali-confident fires (w~0.9,u~0.0, consecutive) are indistinguishable
 // here by construction - that needs retraining with confusables.
 #define KWS_WIN_N         3
-#define KWS_QUIET_THR     0.7f
+// Option-A experiment (2026-09-09): quiet thr 0.70 -> 0.80 to cut
+// YouTube FAs; noisy keeps its +0.08 offset (0.88). Margins, vote,
+// VAD gate and cooldown UNCHANGED. Revert = restore 0.7f/0.78f.
+#define KWS_QUIET_THR     0.8f
 #define KWS_QUIET_MARGIN  0.3f
-#define KWS_NOISY_THR     0.78f
+#define KWS_NOISY_THR     0.88f
 #define KWS_NOISY_MARGIN  0.35f
 #define KWS_NOISY_FLOOR   4000.0f  // silence-floor RMS above this = noisy room
 #define KWS_DEBOUNCE_US   1500000
@@ -619,7 +622,7 @@ void app_main(void)
     fe_init();
     led_init();
     s_kws_ok = kws_init();
-    ESP_LOGI(TAG, "kws %s", s_kws_ok ? "ARMED (avg5 thr 0.70/0.78 adaptive, 4 Hz)" : "OFF (init failed)");
+    ESP_LOGI(TAG, "kws %s", s_kws_ok ? "ARMED (3win thr 0.80/0.88 adaptive, 4 Hz)" : "OFF (init failed)");
 
     int btn_prev = 1;
     int64_t t_boot = esp_timer_get_time();
