@@ -674,12 +674,14 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "serial commands %s", have_serial_cmd ? "ON ('f'/'p')" : "OFF (buttons only)");
 
-    // Big buffers FIRST (unfragmented heap): ring 64 KB + fe 32 KB before
-    // the I2S driver carves its DMA chunks. Ring lives in internal RAM
-    // (hot path, DMA-adjacent, future pre-roll).
+    // Big buffers FIRST (unfragmented heap).
+    // Ring 64 KB -> PSRAM since Phase 7: WiFi/LWIP statics fragment internal
+    // RAM (largest free block ~31 KB < 64 KB, boot dies at "cannot allocate
+    // ring"). Traffic is tiny (1 KB/30 ms in, 32 KB copies 4x/s out,
+    // sequential = cache-friendly); the I2S DMA buffers stay internal.
     ring_buf = heap_caps_malloc(RING_SAMPLES * sizeof(int16_t),
-                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!ring_buf) { ESP_LOGE(TAG, "cannot allocate %u-byte ring", (unsigned)(RING_SAMPLES * 2)); return; }
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ring_buf) { ESP_LOGE(TAG, "cannot allocate %u-byte ring (PSRAM?)", (unsigned)(RING_SAMPLES * 2)); return; }
     // 1 s frontend scratch: internal (hot path).
     fe_pcm = heap_caps_malloc(FE_SR * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!fe_pcm) fe_pcm = malloc(FE_SR * sizeof(int16_t));
